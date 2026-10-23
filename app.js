@@ -276,10 +276,40 @@ function updateOverlay(force) {
 // Smooth karaoke while playing
 (function loop() { if (!video.paused) updateOverlay(); requestAnimationFrame(loop); })();
 
+/* ---------- Transcription: Gemini via the Caption AI backend ---------- */
+// The browser never talks to Google directly: the video goes to our own
+// backend with provider=gemini + the user's key (kept in memory only),
+// the backend extracts the audio and calls Gemini, and timed cues return.
+async function transcribeWithGeminiBackend(key) {
+  if (!key) { setStatus("Paste your Gemini API key first — a free one comes from Google AI Studio (aistudio.google.com, then Get API key).", "error"); return; }
+  if (!videoFile) { setStatus("Re-select / choose a video file first (box at the top of this screen), then transcribe.", "error"); return; }
+  setStatus("Sending your video to the Caption AI server, which transcribes it with Gemini (free)… a longer video takes a little longer to upload.");
+  try {
+    const form = new FormData();
+    form.append("file", videoFile, videoFile.name);
+    form.append("provider", "gemini");
+    form.append("api_key", key);
+    const lang = $("languageSelect").value;
+    if (lang) form.append("language", lang);
+    const res = await fetch(backendBase() + "/api/transcribe", { method: "POST", body: form });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data || data.ok === false) {
+      throw new Error((data && data.error) || ("Server returned " + res.status));
+    }
+    const newCues = Array.isArray(data.cues) ? data.cues : [];
+    if (!newCues.length) throw new Error("Gemini responded, but no speech was found in this clip.");
+    setCues(newCues, `Done — created ${newCues.length} caption cues from Gemini. Click any cue to check and fix words. Timing is approximate — nudge any cue that looks off.`);
+    enterResult();
+  } catch (err) {
+    setStatus("Gemini transcription failed: " + err.message, "error");
+  }
+}
+
 /* ---------- Transcription: Whisper ---------- */
 $("transcribeBtn").addEventListener("click", async () => {
   const key = $("apiKey").value.trim();
   const provider = ($("apiProvider") && $("apiProvider").value) || "openai";
+  if (provider === "gemini") { await transcribeWithGeminiBackend(key); return; }
   const isOR = provider === "openrouter";
   const endpoint = isOR ? "https://openrouter.ai/api/v1/audio/transcriptions" : "https://api.openai.com/v1/audio/transcriptions";
   const model = isOR ? "openai/whisper-1" : "whisper-1";

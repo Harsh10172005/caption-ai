@@ -25,6 +25,12 @@ Env vars:
                     no key, no cost) or "openrouter" (send the audio to
                     OpenRouter's speech-to-text API instead)
     OPENROUTER_API_KEY   required when TRANSCRIBE_PROVIDER=openrouter
+    GEMINI_API_KEY       required when TRANSCRIBE_PROVIDER=gemini (a free
+                    key from Google AI Studio is fine). Gemini hears the
+                    audio and writes timed segments; word timings inside
+                    each segment are estimated evenly, not measured.
+    GEMINI_MODEL         Gemini model slug (default "gemini-2.5-flash",
+                    free-tier in AI Studio)
     OPENROUTER_STT_MODEL OpenRouter STT model slug
                     (default "openai/whisper-1")
     MAX_UPLOAD_MB   upload size guard in MB (default 300 — VN Editor and
@@ -49,6 +55,7 @@ deleted. Nothing is stored. This is a demo service — add auth, rate
 limits and a job queue before exposing it to the public internet.
 """
 
+import base64
 import json
 import os
 import re
@@ -73,6 +80,8 @@ PROVIDER = os.environ.get("TRANSCRIBE_PROVIDER", "local").strip().lower()
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENROUTER_STT_MODEL = os.environ.get("OPENROUTER_STT_MODEL", "openai/whisper-1")
 OPENROUTER_URL = "https://openrouter.ai/api/v1/audio/transcriptions"
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_MB", "300")) * 1024 * 1024
 BACKEND_DIR = Path(__file__).resolve().parent
 FRONTEND_DIR = Path(os.environ.get("FRONTEND_DIR", BACKEND_DIR.parent))
@@ -285,14 +294,14 @@ def _openrouter_fields(language):
     return fields
 
 
-def _openrouter_transcribe_file(mp3_path, language):
+def _openrouter_transcribe_file(mp3_path, language, key):
     """One OpenRouter call for one MP3 file. Returns the parsed JSON."""
     return _post_multipart(OPENROUTER_URL, _openrouter_fields(language), "file",
                            Path(mp3_path).name, Path(mp3_path).read_bytes(),
-                           {"Authorization": "Bearer " + OPENROUTER_API_KEY})
+                           {"Authorization": "Bearer " + key})
 
 
-def transcribe_with_openrouter(audio_mp3_path, language, work_dir=None):
+def transcribe_with_openrouter(audio_mp3_path, language, work_dir=None, api_key=None):
     """Transcribe an extracted MP3 via OpenRouter, chunking if needed.
 
     The *video* can be up to the 300 MB backend limit — that doesn't matter
@@ -302,11 +311,12 @@ def transcribe_with_openrouter(audio_mp3_path, language, work_dir=None):
     transcribed in order, and the word timestamps are shifted by the
     cumulative chunk offsets before the cues are rebuilt.
     Returns (cues, duration, language)."""
-    if not OPENROUTER_API_KEY:
-        raise RuntimeError("TRANSCRIBE_PROVIDER=openrouter but OPENROUTER_API_KEY is not set on the server.")
+    key = (api_key or OPENROUTER_API_KEY or "").strip()
+    if not key:
+        raise RuntimeError("No OpenRouter API key is set. Add one in Advanced options, or set OPENROUTER_API_KEY on the server.")
     audio_mp3_path = Path(audio_mp3_path)
     if audio_mp3_path.stat().st_size <= OPENROUTER_MAX_BYTES:
-        return api_json_to_result(_openrouter_transcribe_file(audio_mp3_path, language))
+        return api_json_to_result(_openrouter_transcribe_file(audio_mp3_path, language, key))
 
     total_duration = probe_duration(audio_mp3_path)
     if not total_duration:
@@ -325,7 +335,7 @@ def transcribe_with_openrouter(audio_mp3_path, language, work_dir=None):
 
     all_words, offset, detected = [], 0.0, None
     for chunk_file in chunk_files:
-        data = _openrouter_transcribe_file(chunk_file, language)
+        data = _openrouter_transcribe_file(chunk_file, language, key)
         for w in _extract_words(data):
             all_words.append({"word": w["word"],
                               "start": round(w["start"] + offset, 3),
@@ -335,19 +345,200 @@ def transcribe_with_openrouter(audio_mp3_path, language, work_dir=None):
     return words_to_cues(all_words), round(offset, 3), detected
 
 
+# ---------------------------------------------------------------- Gemini ---
+# Google Gemini via its generateContent REST API: the extracted audio is
+# sent inline (base64) and the model replies with JSON segments carrying
+# start/end seconds. A free AI Studio key works on the free tier. Gemini
+# does not measure word timings, so words inside a segment are spread
+# evenly — caption timing is approximate, unlike local Whisper.
+GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
+GEMINI_INLINE_MAX_BYTES = 18 * 1024 * 1024  # inline requests cap ~20 MB total
+
+GEMINI_PROMPT = (
+    "Transcribe the speech in this audio exactly as spoken, word for word. "
+    "The speech is Hinglish \u2014 a mix of Hindi and English. Write ALL of it "
+    "in Roman (Latin) script only, exactly as it sounds: Hindi words in Roman "
+    "letters (for example: yaar, bahut accha, matlab, aaj main aapko batane "
+    "wala hoon), never in Devanagari script. Skip music and silence. Break "
+    "the transcript into short segments of roughly 1 to 5 seconds at natural "
+    "pauses, each with its start and end time in seconds. Reply with JSON "
+    "only, in this shape: "
+    "{\"segments\": [{\"start\": 0.0, \"end\": 2.5, \"text\": \"...\"}]}"
+)
+
+GEMINI_RESPONSE_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "segments": {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "start": {"type": "NUMBER"},
+                    "end": {"type": "NUMBER"},
+                    "text": {"type": "STRING"},
+                },
+                "required": ["start", "end", "text"],
+            },
+        }
+    },
+    "required": ["segments"],
+}
+
+
+def _gemini_error_message(code, detail):
+    low = (detail or "").lower()
+    if code == 429 or "quota" in low or "rate" in low:
+        return ("Gemini's free limit was hit (too many requests, or the daily "
+                "free quota is used up). Wait a minute and try again \u2014 if it "
+                "keeps failing, the free quota resets tomorrow.")
+    if "api_key_invalid" in low or "api key not valid" in low or (code in (400, 401, 403) and "key" in low):
+        return ("That Gemini API key was rejected by Google. Check the key "
+                "and try again \u2014 a free key comes from Google AI Studio.")
+    return f"Gemini returned {code}: {detail[:300]}"
+
+
+def _post_json(url, payload, headers):
+    """Minimal JSON POST (stdlib only). Returns parsed JSON.
+    Kept as a small separate function so tests can monkeypatch it."""
+    req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), method="POST")
+    req.add_header("Content-Type", "application/json")
+    for k, v in headers.items():
+        req.add_header(k, v)
+    try:
+        with urllib.request.urlopen(req, timeout=600) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace")[:600]
+        raise RuntimeError(_gemini_error_message(exc.code, detail)) from exc
+
+
+def _gemini_parse_segments(data):
+    """Pull [{start, end, text}] out of a generateContent response."""
+    try:
+        parts = data["candidates"][0]["content"]["parts"]
+        text = "".join(str(p.get("text", "")) for p in parts)
+    except (KeyError, IndexError, TypeError) as exc:
+        raise RuntimeError("Gemini replied in an unexpected shape \u2014 no transcript was returned.") from exc
+    text = text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z]*\s*|\s*```$", "", text).strip()
+    try:
+        parsed = json.loads(text)
+    except ValueError as exc:
+        raise RuntimeError("Gemini's reply could not be read as a transcript. Please try again.") from exc
+    raw = parsed.get("segments") if isinstance(parsed, dict) else parsed
+    segments = []
+    for seg in raw or []:
+        try:
+            start, end = float(seg["start"]), float(seg["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        txt = str(seg.get("text", "")).strip()
+        if not txt:
+            continue
+        if end <= start:
+            end = start + 0.5
+        segments.append({"start": round(start, 3), "end": round(end, 3), "text": txt})
+    segments.sort(key=lambda sgm: sgm["start"])
+    return segments
+
+
+def _gemini_transcribe_mp3(mp3_path, key):
+    """One Gemini call for one MP3 file. Returns raw segment dicts."""
+    audio_b64 = base64.b64encode(Path(mp3_path).read_bytes()).decode("ascii")
+    payload = {
+        "contents": [{"parts": [
+            {"text": GEMINI_PROMPT},
+            {"inline_data": {"mime_type": "audio/mpeg", "data": audio_b64}},
+        ]}],
+        "generationConfig": {
+            "temperature": 0,
+            "responseMimeType": "application/json",
+            "responseSchema": GEMINI_RESPONSE_SCHEMA,
+        },
+    }
+    url = f"{GEMINI_API_BASE}/{GEMINI_MODEL}:generateContent"
+    return _gemini_parse_segments(_post_json(url, payload, {"x-goog-api-key": key}))
+
+
+def _segments_to_cues(segments):
+    """Segments -> cues, spreading each segment's words evenly across it."""
+    words = []
+    for seg in segments:
+        ws = seg["text"].split()
+        if not ws:
+            continue
+        per = (seg["end"] - seg["start"]) / len(ws)
+        words.extend({"word": t, "start": round(seg["start"] + i * per, 3),
+                      "end": round(seg["start"] + (i + 1) * per, 3)} for i, t in enumerate(ws))
+    return words_to_cues(words)
+
+
+def transcribe_with_gemini(audio_path, language, api_key=None, work_dir=None):
+    """Transcribe extracted audio via Google Gemini (free-tier friendly).
+
+    Returns (cues, duration, language). The audio is sent as a compact
+    mono MP3 inline; if it is too large for one inline request it is
+    split into ~8-minute chunks whose segment times are re-offset."""
+    key = (api_key or GEMINI_API_KEY or "").strip()
+    if not key:
+        raise RuntimeError("No Gemini API key is set. Add one in Advanced options, or set GEMINI_API_KEY on the server.")
+    audio_path = Path(audio_path)
+    work_dir = Path(work_dir or audio_path.parent)
+    mp3_path = audio_path
+    if audio_path.suffix.lower() != ".mp3":
+        mp3_path = work_dir / "gemini-audio.mp3"
+        ok, err = run([
+            "ffmpeg", "-y", "-v", "error", "-i", str(audio_path),
+            "-vn", "-ac", "1", "-ar", "16000", "-codec:a", "libmp3lame", "-b:a", "48k",
+            str(mp3_path),
+        ])
+        if not ok:
+            raise RuntimeError("ffmpeg could not prepare the audio for Gemini. " + err)
+    if mp3_path.stat().st_size <= GEMINI_INLINE_MAX_BYTES:
+        segments = _gemini_transcribe_mp3(mp3_path, key)
+        cues = _segments_to_cues(segments)
+        duration = segments[-1]["end"] if segments else 0
+        return cues, round(float(duration), 3), None
+
+    total = probe_duration(mp3_path)
+    if not total:
+        raise RuntimeError("Could not measure the extracted audio, so it cannot be chunked for Gemini.")
+    size = mp3_path.stat().st_size
+    chunk_seconds = int(max(60, min(480, total * (GEMINI_INLINE_MAX_BYTES / size) * 0.92)))
+    ok, err = run([
+        "ffmpeg", "-y", "-v", "error", "-i", str(mp3_path),
+        "-f", "segment", "-segment_time", str(chunk_seconds), "-c", "copy",
+        str(work_dir / "gchunk%03d.mp3"),
+    ])
+    chunk_files = sorted(work_dir.glob("gchunk*.mp3"))
+    if not ok or not chunk_files:
+        raise RuntimeError("ffmpeg could not split the long audio into chunks for Gemini. " + err)
+    all_segments, offset = [], 0.0
+    for chunk_file in chunk_files:
+        for seg in _gemini_transcribe_mp3(chunk_file, key):
+            all_segments.append({"start": round(seg["start"] + offset, 3),
+                                 "end": round(seg["end"] + offset, 3),
+                                 "text": seg["text"]})
+        offset += probe_duration(chunk_file) or chunk_seconds
+    return _segments_to_cues(all_segments), round(float(offset), 3), None
+
+
 # ---------------------------------------------------------------- API ------
 @app.get("/health")
 def health():
     return {
         "ok": True,
         "provider": PROVIDER,
-        "model": OPENROUTER_STT_MODEL if PROVIDER == "openrouter" else MODEL_NAME,
+        "model": {"openrouter": OPENROUTER_STT_MODEL, "gemini": GEMINI_MODEL}.get(PROVIDER, MODEL_NAME),
         "model_loaded": _model is not None,
     }
 
 
 @app.post("/api/transcribe")
-def transcribe(file: UploadFile = File(...), language: str = Form("")):
+def transcribe(file: UploadFile = File(...), language: str = Form(""),
+               provider: str = Form(""), api_key: str = Form("")):
     tmp = Path(tempfile.mkdtemp(prefix="captionai-"))
     try:
         suffix = Path(file.filename or "video.mp4").suffix or ".mp4"
@@ -360,8 +551,12 @@ def transcribe(file: UploadFile = File(...), language: str = Form("")):
             return json_error("The uploaded file was empty.")
 
         lang = language.strip() or None
+        eff_provider = (provider or PROVIDER).strip().lower()
+        if eff_provider not in ("local", "openrouter", "gemini"):
+            eff_provider = PROVIDER
+        req_key = api_key.strip() or None
 
-        if PROVIDER == "openrouter":
+        if eff_provider == "gemini":
             mp3_path = tmp / "audio.mp3"
             ok, err = run([
                 "ffmpeg", "-y", "-v", "error", "-i", str(video_path),
@@ -371,7 +566,29 @@ def transcribe(file: UploadFile = File(...), language: str = Form("")):
             if not ok:
                 return json_error("ffmpeg could not extract audio from that file. Is it a valid video? " + err, status=422)
             try:
-                cue_list, duration, detected = transcribe_with_openrouter(mp3_path, lang, work_dir=tmp)
+                cue_list, duration, detected = transcribe_with_gemini(mp3_path, lang, api_key=req_key, work_dir=tmp)
+            except RuntimeError as exc:
+                return json_error(str(exc), status=502)
+            return {
+                "ok": True,
+                "provider": "gemini",
+                "duration": duration,
+                "language": detected,
+                "cues": cue_list,
+                "srt": cues_to_srt(cue_list),
+            }
+
+        if eff_provider == "openrouter":
+            mp3_path = tmp / "audio.mp3"
+            ok, err = run([
+                "ffmpeg", "-y", "-v", "error", "-i", str(video_path),
+                "-vn", "-ac", "1", "-ar", "16000", "-codec:a", "libmp3lame", "-q:a", "4",
+                str(mp3_path),
+            ])
+            if not ok:
+                return json_error("ffmpeg could not extract audio from that file. Is it a valid video? " + err, status=422)
+            try:
+                cue_list, duration, detected = transcribe_with_openrouter(mp3_path, lang, work_dir=tmp, api_key=req_key)
             except RuntimeError as exc:
                 return json_error(str(exc), status=502)
             return {
@@ -486,6 +703,8 @@ def _run_job(job, video_path, language, tmp):
     """Worker thread: preparing -> transcribing -> generating_captions
     -> preparing_editor -> completed (or failed / cancelled)."""
     cancel = job["cancel"]
+    job_provider = (job.get("provider") or PROVIDER).strip().lower()
+    job_key = job.get("api_key") or None
 
     def was_cancelled():
         if cancel.is_set():
@@ -500,7 +719,7 @@ def _run_job(job, video_path, language, tmp):
             return
 
         # --- preparing: validate + extract the audio track ---------------
-        if PROVIDER == "openrouter":
+        if job_provider in ("openrouter", "gemini"):
             audio_path = tmp / "audio.mp3"
             ok, err = run([
                 "ffmpeg", "-y", "-v", "error", "-i", str(video_path),
@@ -523,12 +742,26 @@ def _run_job(job, video_path, language, tmp):
         # --- transcribing --------------------------------------------------
         _set(job, stage="transcribing", message="Listening to your audio…")
         words, cues, duration, detected = [], None, 0.0, None
-        if PROVIDER == "openrouter":
+        if job_provider == "gemini":
+            _set(job, progress=None)  # single API call: indeterminate
+            if was_cancelled():
+                return
+            try:
+                cues, duration, detected = transcribe_with_gemini(audio_path, language, api_key=job_key, work_dir=tmp)
+            except RuntimeError as exc:
+                _finish(job, "failed", "transcribing",
+                        "Captioning failed while transcribing your audio.",
+                        error={"stage": "transcribing", "message": str(exc)})
+                return
+            words = [w for c in cues for w in (c.get("words") or [])]
+            if was_cancelled():
+                return
+        elif job_provider == "openrouter":
             _set(job, progress=None)  # no segment stream: indeterminate
             if was_cancelled():
                 return
             try:
-                cues, duration, detected = transcribe_with_openrouter(audio_path, language, work_dir=tmp)
+                cues, duration, detected = transcribe_with_openrouter(audio_path, language, work_dir=tmp, api_key=job_key)
             except RuntimeError as exc:
                 _finish(job, "failed", "transcribing",
                         "Captioning failed while transcribing your audio.",
@@ -603,7 +836,7 @@ def _run_job(job, video_path, language, tmp):
             "srt": srt,
             "language": detected,
             "duration": round(float(duration), 3),
-            "provider": PROVIDER,
+            "provider": job_provider,
         }
         _set(job, progress=99, result=result)
         _finish(job, "completed", "completed", "Your captions are ready!")
@@ -616,7 +849,8 @@ def _run_job(job, video_path, language, tmp):
 
 
 @app.post("/api/jobs")
-def create_job(file: UploadFile = File(...), language: str = Form("")):
+def create_job(file: UploadFile = File(...), language: str = Form(""),
+               provider: str = Form(""), api_key: str = Form("")):
     tmp = Path(tempfile.mkdtemp(prefix="captionai-job-"))
     suffix = Path(file.filename or "video.mp4").suffix or ".mp4"
     video_path = tmp / f"input{suffix}"
@@ -628,8 +862,12 @@ def create_job(file: UploadFile = File(...), language: str = Form("")):
     if size == 0:
         shutil.rmtree(tmp, ignore_errors=True)
         return json_error("The uploaded file was empty.")
+    eff_provider = (provider or PROVIDER).strip().lower()
+    if eff_provider not in ("local", "openrouter", "gemini"):
+        eff_provider = PROVIDER
     job_id = uuid.uuid4().hex
     job = {
+        "provider": eff_provider, "api_key": api_key.strip() or None,
         "id": job_id, "status": "queued", "stage": "uploaded", "progress": 0,
         "eta": None, "message": "Video received — captioning will start in a moment.",
         "error": None, "result": None,
