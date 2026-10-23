@@ -29,8 +29,9 @@ Env vars:
                     key from Google AI Studio is fine). Gemini hears the
                     audio and writes timed segments; word timings inside
                     each segment are estimated evenly, not measured.
-    GEMINI_MODEL         Gemini model slug (default "gemini-2.5-flash",
-                    free-tier in AI Studio)
+    GEMINI_MODEL         Gemini model slug (default "gemini-3.8-flash",
+                    free-tier in AI Studio; the 2.5 family is closed
+                    to new API users since late 2026)
     OPENROUTER_STT_MODEL OpenRouter STT model slug
                     (default "openai/whisper-1")
     MAX_UPLOAD_MB   upload size guard in MB (default 300 — VN Editor and
@@ -81,7 +82,7 @@ OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENROUTER_STT_MODEL = os.environ.get("OPENROUTER_STT_MODEL", "openai/whisper-1")
 OPENROUTER_URL = "https://openrouter.ai/api/v1/audio/transcriptions"
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_MB", "300")) * 1024 * 1024
 BACKEND_DIR = Path(__file__).resolve().parent
 FRONTEND_DIR = Path(os.environ.get("FRONTEND_DIR", BACKEND_DIR.parent))
@@ -392,6 +393,9 @@ def _gemini_error_message(code, detail):
         return ("Gemini's free limit was hit (too many requests, or the daily "
                 "free quota is used up). Wait a minute and try again \u2014 if it "
                 "keeps failing, the free quota resets tomorrow.")
+    if code == 404 or "no longer available" in low or "not found" in low:
+        return ("That Gemini model is not available for your API key. Set "
+                "GEMINI_MODEL to a current model (for example gemini-3.8-flash) and try again.")
     if "api_key_invalid" in low or "api key not valid" in low or (code in (400, 401, 403) and "key" in low):
         return ("That Gemini API key was rejected by Google. Check the key "
                 "and try again \u2014 a free key comes from Google AI Studio.")
