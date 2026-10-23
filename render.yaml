@@ -1,0 +1,13 @@
+# Render Blueprint — deploys Caption AI (FastAPI backend + frontend) as one
+# free web service using the repo's Dockerfile.
+# Render dashboard → New → Blueprint → connect this repo → Apply.
+services:
+  - type: web
+    name: caption-ai
+    runtime: docker
+    plan: free
+    envVars:
+      - key: WHISPER_MODEL
+        value: tiny
+      - key: TRANSCRIBE_PROVIDER
+        value: local
