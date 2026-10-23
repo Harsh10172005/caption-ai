@@ -389,6 +389,9 @@ GEMINI_RESPONSE_SCHEMA = {
 
 def _gemini_error_message(code, detail):
     low = (detail or "").lower()
+    if code == 503 or "unavailable" in low or "high demand" in low:
+        return ("Gemini is busy right now \u2014 high demand on the free tier. "
+                "This is temporary: wait a minute and try again.")
     if code == 429 or "quota" in low or "rate" in low:
         return ("Gemini's free limit was hit (too many requests, or the daily "
                 "free quota is used up). Wait a minute and try again \u2014 if it "
@@ -400,6 +403,14 @@ def _gemini_error_message(code, detail):
         return ("That Gemini API key was rejected by Google. Check the key "
                 "and try again \u2014 a free key comes from Google AI Studio.")
     return f"Gemini returned {code}: {detail[:300]}"
+
+
+class GeminiError(RuntimeError):
+    """A Gemini API failure, carrying the HTTP status for retry logic."""
+
+    def __init__(self, message, code=None):
+        super().__init__(message)
+        self.code = code
 
 
 def _post_json(url, payload, headers):
@@ -414,7 +425,7 @@ def _post_json(url, payload, headers):
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", "replace")[:600]
-        raise RuntimeError(_gemini_error_message(exc.code, detail)) from exc
+        raise GeminiError(_gemini_error_message(exc.code, detail), code=exc.code) from exc
 
 
 def _gemini_parse_segments(data):
@@ -463,7 +474,16 @@ def _gemini_transcribe_mp3(mp3_path, key):
         },
     }
     url = f"{GEMINI_API_BASE}/{GEMINI_MODEL}:generateContent"
-    return _gemini_parse_segments(_post_json(url, payload, {"x-goog-api-key": key}))
+    # The free tier regularly answers 503 "high demand" in bursts; those
+    # clear within seconds, so retry twice before troubling the user.
+    for attempt in range(3):
+        try:
+            return _gemini_parse_segments(_post_json(url, payload, {"x-goog-api-key": key}))
+        except GeminiError as exc:
+            if exc.code == 503 and attempt < 2:
+                time.sleep(5 if attempt == 0 else 20)
+                continue
+            raise
 
 
 def _segments_to_cues(segments):
