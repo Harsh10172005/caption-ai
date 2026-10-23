@@ -14,6 +14,30 @@ const DEMO_DURATION = 36;
 function setStatus(msg, kind = "") {
   statusEl.textContent = msg;
   statusEl.className = "status " + kind;
+  // Errors must be impossible to miss: bring the status bar to the user
+  // instead of hoping they notice a line of text somewhere on the page.
+  if (kind === "error" && statusEl.scrollIntoView) {
+    statusEl.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }
+}
+function guideToGenerate(flash = true) {
+  // Send the user's eyes to the "Generate captions" panel and pulse it.
+  const panel = document.getElementById("transcribePanel");
+  if (!panel) return;
+  panel.open = true;
+  panel.scrollIntoView({ block: "center", behavior: "smooth" });
+  if (flash) {
+    panel.classList.remove("attention");
+    void panel.offsetWidth; // restart the animation
+    panel.classList.add("attention");
+    setTimeout(() => panel.classList.remove("attention"), 3600);
+  }
+}
+function requireCues(action) {
+  if (cues.length) return true;
+  setStatus(`⚠️ No captions yet — ${action} needs captions first. Step 1: generate them in the “1 · Generate captions” panel (Auto-caption, API key, paste a script, or Import SRT). Then try again.`, "error");
+  guideToGenerate(true);
+  return false;
 }
 function fmt(t) {
   if (!isFinite(t)) t = 0;
@@ -54,10 +78,11 @@ function loadVideoFile(file) {
   const mb = (file.size / 1048576).toFixed(1);
   $("fileInfo").textContent = `${file.name} · ${mb} MB`;
   if (file.size > 25 * 1024 * 1024) {
-    setStatus(`Loaded ${file.name} (${mb} MB). Warning: this is over Whisper's 25 MB limit — transcription via API will fail. Trim/compress it, or use script mode below.`, "error");
+    setStatus(`✅ Video loaded: ${file.name} (${mb} MB). NEXT STEP → generate captions in the panel below: press “Auto-caption my video”. (Note: at ${mb} MB the API-key mode is over its 25 MB limit — Auto-caption via the backend accepts videos up to 300 MB.)`, "ok");
   } else {
-    setStatus(`Loaded ${file.name} (${mb} MB). Now transcribe with Whisper, paste a script, or edit the demo captions.`, "ok");
+    setStatus(`✅ Video loaded: ${file.name} (${mb} MB). NEXT STEP → generate captions in the panel below: press “Auto-caption my video” (backend, no key), or use an API key / paste a script. Nothing is captioned yet — exporting before this step won't work.`, "ok");
   }
+  guideToGenerate(true);
 }
 $("videoInput").addEventListener("change", (e) => loadVideoFile(e.target.files[0]));
 const dz = $("dropZone");
@@ -68,8 +93,18 @@ dz.addEventListener("keydown", (e) => { if (e.key === "Enter") $("videoInput").c
 
 video.addEventListener("loadedmetadata", () => {
   $("timeLabel").textContent = `${fmt(video.currentTime)} / ${fmt(video.duration)}`;
+  // Codec sanity check AT UPLOAD TIME: a file the browser cannot decode
+  // (classic case: iPhone/VN .mov or HEVC in some browsers) would otherwise
+  // fail mysteriously later, at export time.
+  if (!isFinite(video.duration) || video.duration === 0 || video.videoWidth === 0) {
+    setStatus("⚠️ This file loaded but the browser can't decode its video (duration/size unreadable). It's probably an unsupported codec such as HEVC/.mov. Please export it as MP4 (H.264) — in VN: Share → Export → MP4 — or use the backend, which handles these files with FFmpeg.", "error");
+  }
   if (cues.length && !videoFile) return;
   if (cues.length) renderCues(); // re-time script cues if they were made before load
+});
+video.addEventListener("error", () => {
+  if (!videoFile) return;
+  setStatus("⚠️ This video file can't be played by this browser — its codec isn't supported here (common with .mov / HEVC exports). Please use an MP4 (H.264) file, or send it through the backend (Auto-caption / Export MP4), which uses FFmpeg and isn't limited by browser codecs.", "error");
 });
 video.addEventListener("timeupdate", () => {
   $("timeLabel").textContent = `${fmt(video.currentTime)} / ${fmt(video.duration)}`;
@@ -192,27 +227,33 @@ function updateOverlay(force) {
 /* ---------- Transcription: Whisper ---------- */
 $("transcribeBtn").addEventListener("click", async () => {
   const key = $("apiKey").value.trim();
-  if (!key) { setStatus("Paste your OpenAI API key first — or use script mode / the demo below, no key needed.", "error"); return; }
+  const provider = ($("apiProvider") && $("apiProvider").value) || "openai";
+  const isOR = provider === "openrouter";
+  const endpoint = isOR ? "https://openrouter.ai/api/v1/audio/transcriptions" : "https://api.openai.com/v1/audio/transcriptions";
+  const model = isOR ? "openai/whisper-1" : "whisper-1";
+  if (!key) { setStatus(`Paste your ${isOR ? "OpenRouter" : "OpenAI"} API key first — or use Auto-caption / script mode / the demo, no key needed.`, "error"); return; }
   if (!videoFile) { setStatus("Choose a video file first, then transcribe.", "error"); return; }
-  if (videoFile.size > 25 * 1024 * 1024) { setStatus("This file is over 25 MB, so Whisper will reject it. Trim or compress the video, or paste a script instead.", "error"); return; }
-  setStatus("Sending video to OpenAI Whisper… this can take a moment for longer clips.");
+  if (videoFile.size > 25 * 1024 * 1024) { setStatus("This file is over 25 MB, so the transcription API will reject it. Trim or compress the video, or paste a script instead.", "error"); return; }
+  setStatus(`Sending video to ${isOR ? "OpenRouter" : "OpenAI"} Whisper… this can take a moment for longer clips.${isOR ? " Note: OpenRouter ignores the Hinglish prompt, so Hindi may come back in Devanagari script." : ""}`);
   try {
     const form = new FormData();
     form.append("file", videoFile, videoFile.name);
-    form.append("model", "whisper-1");
+    form.append("model", model);
     form.append("response_format", "verbose_json");
     form.append("timestamp_granularities[]", "word");
     form.append("timestamp_granularities[]", "segment");
     form.append("temperature", "0");
+    // OpenRouter accepts `prompt` but ignores it; OpenAI uses it to bias
+    // toward Roman-script Hinglish. Harmless to send to both.
     form.append("prompt", "This is Hinglish content, a mix of Hindi and English. Transcribe in Roman script (Latin alphabet), exactly as spoken, keeping Hindi words in Roman letters, for example: yaar, bahut, matlab, aaj kal, bilkul sahi hai.");
     const lang = $("languageSelect").value;
     if (lang) form.append("language", lang);
-    const res = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+    const res = await fetch(endpoint, {
       method: "POST", headers: { Authorization: "Bearer " + key }, body: form,
     });
     if (!res.ok) {
       const detail = await res.text().catch(() => "");
-      throw new Error(`Whisper returned ${res.status}. ${detail.slice(0, 240)}`);
+      throw new Error(`${isOR ? "OpenRouter" : "Whisper"} returned ${res.status}. ${detail.slice(0, 240)}`);
     }
     const data = await res.json();
     let newCues = [];
@@ -229,6 +270,75 @@ $("transcribeBtn").addEventListener("click", async () => {
   } catch (err) {
     setStatus("Transcription failed: " + err.message + " Check your key, connection, and file size, then try again — or use script mode.", "error");
   }
+});
+
+/* ---------- Transcription + MP4 export: Caption AI backend (no key) ---------- */
+function backendBase() {
+  // Empty field = same origin (page served by the backend itself).
+  return ($("backendUrl").value || "").trim().replace(/\/+$/, "");
+}
+try {
+  const savedBackend = localStorage.getItem("captionAiBackendUrl");
+  if (savedBackend) $("backendUrl").value = savedBackend;
+  $("backendUrl").addEventListener("change", () => {
+    try { localStorage.setItem("captionAiBackendUrl", $("backendUrl").value.trim()); } catch (e) {}
+  });
+} catch (e) { /* storage blocked: backend field just won't persist */ }
+
+async function parseBackendError(res) {
+  try { const j = await res.json(); if (j && j.error) return j.error; } catch (e) {}
+  try { return (await res.text()).slice(0, 200); } catch (e) { return "HTTP " + res.status; }
+}
+
+const BACKEND_MAX_MB = 300;
+$("autoCaptionBtn").addEventListener("click", async () => {
+  if (!videoFile) { setStatus("Choose a video file first, then auto-caption it.", "error"); return; }
+  if (videoFile.size > BACKEND_MAX_MB * 1024 * 1024) { setStatus(`⚠️ This video is ${(videoFile.size / 1048576).toFixed(0)} MB — over the backend's ${BACKEND_MAX_MB} MB limit. Please trim or compress it first (in VN Editor: export at 1080p instead of 4K).`, "error"); return; }
+  const base = backendBase();
+  const btn = $("autoCaptionBtn"); btn.disabled = true;
+  setStatus(`Uploading ${videoFile.name} to the Caption AI backend for transcription… longer clips take a while, and the first run loads the Whisper model. Keep this tab open.`);
+  try {
+    const form = new FormData();
+    form.append("file", videoFile, videoFile.name);
+    const lang = $("languageSelect").value;
+    if (lang) form.append("language", lang);
+    const res = await fetch(base + "/api/transcribe", { method: "POST", body: form });
+    if (!res.ok) throw new Error(await parseBackendError(res));
+    const data = await res.json();
+    if (!data.cues || !data.cues.length) throw new Error("The backend found no speech in this clip.");
+    setCues(data.cues.map((c) => ({
+      start: c.start, end: c.end, text: c.text,
+      words: (c.words && c.words.length) ? c.words : (() => {
+        const ws = c.text.trim().split(/\s+/).filter(Boolean); const per = ws.length ? (c.end - c.start) / ws.length : 0;
+        return ws.map((w, j) => ({ word: w, start: c.start + j * per, end: c.start + (j + 1) * per }));
+      })(),
+    })), `Auto-caption done — the backend created ${data.cues.length} cues${data.language ? ` (detected language: ${data.language})` : ""}. Check the words, fix any mistakes, style them, then export.`);
+  } catch (err) {
+    setStatus("Auto-caption failed: " + (err && err.message ? err.message : err) + " — the backend may be unreachable. Check the Backend URL, or fall back to the Whisper key / script modes below; they still work.", "error");
+  } finally { btn.disabled = false; }
+});
+
+$("exportMp4BackendBtn").addEventListener("click", async () => {
+  if (!videoFile) { setStatus("Load a video first — backend MP4 export needs the original clip.", "error"); return; }
+  if (videoFile.size > BACKEND_MAX_MB * 1024 * 1024) { setStatus(`⚠️ This video is ${(videoFile.size / 1048576).toFixed(0)} MB — over the backend's ${BACKEND_MAX_MB} MB limit. Please trim or compress it first.`, "error"); return; }
+  if (!requireCues("Backend MP4 export")) return;
+  const base = backendBase();
+  const btn = $("exportMp4BackendBtn"); btn.disabled = true;
+  setStatus("Sending video + captions to the backend to burn in… you'll get a captioned MP4 back.");
+  try {
+    const form = new FormData();
+    form.append("file", videoFile, videoFile.name);
+    form.append("srt", toSRT(cues));
+    form.append("fontsize", String(Math.max(14, Math.round(style.size * 0.85))));
+    form.append("color", style.color);
+    form.append("position", style.pos);
+    const res = await fetch(base + "/api/burn", { method: "POST", body: form });
+    if (!res.ok) throw new Error(await parseBackendError(res));
+    download("captioned-video.mp4", await res.blob());
+    setStatus("Done — downloaded captioned-video.mp4 with burned-in captions, made by the backend.", "ok");
+  } catch (err) {
+    setStatus("Backend MP4 export failed: " + (err && err.message ? err.message : err) + " — check the Backend URL / that the backend is running, or use the browser WebM export instead.", "error");
+  } finally { btn.disabled = false; }
 });
 
 /* ---------- Transcription: script fallback + demo ---------- */
@@ -325,12 +435,12 @@ function toSRT(list) {
   return list.map((c, i) => `${i + 1}\n${fmtSRT(c.start)} --> ${fmtSRT(c.end)}\n${c.text.trim()}\n`).join("\n");
 }
 $("exportSrtBtn").addEventListener("click", () => {
-  if (!cues.length) { setStatus("Nothing to export yet — create some captions first.", "error"); return; }
+  if (!requireCues("SRT export")) return;
   download("captions.srt", new Blob([toSRT(cues)], { type: "text/plain;charset=utf-8" }));
   setStatus("Downloaded captions.srt", "ok");
 });
 $("exportWordSrtBtn").addEventListener("click", () => {
-  if (!cues.length) { setStatus("Nothing to export yet — create some captions first.", "error"); return; }
+  if (!requireCues("Word-level SRT export")) return;
   const wordCues = [];
   cues.forEach((c) => {
     if (c.words && c.words.length) c.words.forEach((w) => wordCues.push({ start: w.start, end: w.end, text: w.word }));
@@ -369,15 +479,30 @@ function seekToStart() {
   });
 }
 $("exportVideoBtn").addEventListener("click", async () => {
-  if (!video.src) { setStatus("Load a video first — burned-in export needs a real clip to render.", "error"); return; }
-  if (!cues.length) { setStatus("Create captions first, then export the video.", "error"); return; }
+  if (!video.src) { setStatus("Load a video first — in-browser export needs a real clip to render.", "error"); return; }
+  if (!requireCues("Video export")) return;
+  // Detect an unsupported export environment UP FRONT, with a specific way
+  // out — never let this fail silently or mid-render. The classic case is
+  // Safari, where canvas.captureStream / MediaRecorder video recording are
+  // missing or unreliable; the backend MP4 export is the answer there.
+  const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent || "");
   if (!window.MediaRecorder || !HTMLCanvasElement.prototype.captureStream) {
-    setStatus("Video export isn't supported in this browser. Please use Chrome, or export the SRT files instead.", "error"); return;
+    setStatus(isSafari
+      ? "⚠️ In-browser video export isn't supported in Safari — Safari can't record the captioned video this way. Use “Export MP4 (backend)” instead (the server renders a real MP4), or open this page in Chrome for the in-browser export."
+      : "⚠️ In-browser video export isn't supported in this browser (no MediaRecorder/captureStream). Use “Export MP4 (backend)” instead, or open this page in Chrome.", "error");
+    return;
   }
   const btn = $("exportVideoBtn"); btn.disabled = true;
   const progress = $("exportProgress"); progress.hidden = false; progress.value = 0;
-  setStatus("Exporting… the video will play through in real time while captions are drawn onto it. Keep this tab open.");
+  const progressText = $("exportProgressText"); progressText.hidden = false; progressText.textContent = "Preparing export…";
+  const cancelBtn = $("exportCancelBtn"); cancelBtn.hidden = false;
+  let exportCancelled = false;
+  cancelBtn.onclick = () => { exportCancelled = true; try { video.pause(); } catch (e) {} };
+  setStatus("Exporting… the video will play through in real time while captions are drawn onto it. Keep this tab open — you can cancel any time.");
   let rec = null;
+  let elapsedTimer = setInterval(() => {
+    if (video.duration) progressText.textContent = `Exporting… ${fmt(video.currentTime)} of ${fmt(video.duration)} (${Math.round((video.currentTime / video.duration) * 100)}%) — rendering in real time.`;
+  }, 500);
   try {
     video.pause();
     await seekToStart();
@@ -438,11 +563,28 @@ $("exportVideoBtn").addEventListener("click", async () => {
     // Start the recorder BEFORE play() so no opening frames/audio are missed,
     // then play, then draw. ('ended' was already registered above.)
     rec.start(250);
-    await video.play();
+    try {
+      await video.play();
+    } catch (playErr) {
+      // Gesture/autoplay activation can be lost across the awaits above
+      // (notably on longer clips), so play() can reject even though the
+      // user clicked Export. Fail cleanly with the exact remedy instead
+      // of hanging forever on a video that never plays.
+      try { if (rec.state !== "inactive") rec.stop(); } catch (e) {}
+      throw new Error("the browser refused to start playback (" + (playErr.name || "blocked") + "). Press Play on the video once so it starts, pause it, then press Export again — or use “Export MP4 (backend)”, which doesn't need playback at all.");
+    }
     draw();
-    await ended;
+    // Wait for the video to end OR for a cancel — a paused video never
+    // fires 'ended', so without this the cancel button would hang the export.
+    await Promise.race([ended, new Promise((r) => {
+      const iv = setInterval(() => { if (exportCancelled) { clearInterval(iv); r(); } }, 250);
+    })]);
     if (rec.state !== "inactive") rec.stop();
     await stopped;
+    if (exportCancelled) {
+      setStatus("Export cancelled — nothing was downloaded. Your video and captions are unchanged.", "error");
+      return;
+    }
     // NOTE: the shared AudioContext is deliberately NOT closed here — it is
     // reused by the next export, and closing it would break second exports.
     download("captioned-video.webm", new Blob(chunks, { type: "video/webm" }));
@@ -451,6 +593,7 @@ $("exportVideoBtn").addEventListener("click", async () => {
     try { if (rec && rec.state !== "inactive") rec.stop(); } catch (e) {}
     setStatus("Video export failed: " + err.message + " Try Chrome, or export the SRT files instead.", "error");
   } finally {
-    btn.disabled = false; progress.hidden = true;
+    clearInterval(elapsedTimer);
+    btn.disabled = false; progress.hidden = true; progressText.hidden = true; cancelBtn.hidden = true; cancelBtn.onclick = null;
   }
 });

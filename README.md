@@ -1,6 +1,6 @@
 # Caption AI
 
-A static, Hinglish-first caption editor for talking-head videos. Upload a clip, transcribe its Hindi + English (Hinglish) audio, edit the captions, style them, and export — all from a single page with **vanilla HTML, CSS, and JavaScript. No build step, no backend, no dependencies.**
+A Hinglish-first caption editor for talking-head videos. Upload a clip, transcribe its Hindi + English (Hinglish) audio, edit the captions, style them, and export. The frontend is a single page of vanilla HTML/CSS/JS, and there is now a **real backend** (`backend/`, FastAPI + faster-whisper + FFmpeg) that does what hosted tools do: **upload a video → captions are generated on the server → a captioned MP4 comes back — no API key, no pasting scripts.**
 
 > This is an original project. It is inspired by the general workflow of AI caption tools (upload → transcribe → edit → export), but all copy, design, and code here are written from scratch.
 
@@ -52,6 +52,51 @@ python3 -m http.server 8000
 
 Because the app is fully static, GitHub Pages hosting is free and sufficient. Do not commit any API key — the app never needs one baked in.
 
+## Backend — auto-captioning with NO key (the Headroom-style flow)
+
+A static web page cannot transcribe audio or burn MP4s by itself; that work needs a server. `backend/app.py` is that server:
+
+- `GET  /health` → `{"ok": true, "provider": ..., "model": ...}`
+- `POST /api/transcribe` — multipart video upload. FFmpeg extracts the audio, **faster-whisper runs on the server**, and the API returns `{duration, language, cues:[{start,end,text,words}], srt}` with word-level timings. The editor's **Auto-caption my video** button uses this and fills the cues in automatically.
+- `POST /api/burn` — multipart video + SRT + style fields (fontsize, color, position). FFmpeg's `subtitles` filter burns the captions in and the API returns a real **captioned MP4** — the **Export MP4 (backend)** button.
+- The backend also serves the static frontend at `/`, so **one service is the whole product**. CORS is open (demo), videos up to 300 MB are accepted by default (`MAX_UPLOAD_MB`) — a ~1–2 minute VN Editor export at high bitrate can be 250 MB+, and the cap leaves headroom. Uploads are **streamed to disk in chunks (never loaded into RAM)**, and **only the extracted audio is used for transcription** — the video file itself is processed at full original quality for caption burn-in, never downscaled. The one real cost of a big file is upload time, which depends on the user's connection and the hosting (on the same network it's seconds; over the internet, a 300 MB upload takes as long as any 300 MB upload). Temp files are deleted after each request.
+- One dependency gotcha, already handled in `backend/requirements.txt`: PyAV 15+ removed the `metadata_errors` argument that faster-whisper's audio decoder passes, so `av` is pinned to `14.2.0` — without the pin, every transcription fails with a TypeError.
+
+### Run it locally
+
+```bash
+cd backend
+pip install -r requirements.txt   # needs Python 3.10+ and ffmpeg on PATH
+uvicorn app:app --host 0.0.0.0 --port 8000
+# open http://localhost:8000 — pick a video, press "Auto-caption my video"
+```
+
+The frontend can also run separately (GitHub Pages etc.): put the backend's URL in the **Backend URL** field in the editor. Leave it empty when the page came from the backend itself.
+
+First transcription downloads the Whisper model (`tiny` ≈ 75 MB). `tiny` is fast; set `WHISPER_MODEL=base` or `small` for noticeably better Hinglish accuracy at the cost of speed.
+
+### Transcription provider: local Whisper **or** OpenRouter
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `TRANSCRIBE_PROVIDER` | `local` | `local` = faster-whisper on this server (free, private, no limits beyond your hardware). `openrouter` = extract audio to MP3 and send it to OpenRouter's STT API. |
+| `OPENROUTER_API_KEY` | — | Required in `openrouter` mode. Use a key with OpenRouter credits — STT usage is billed to your OpenRouter account. |
+| `OPENROUTER_STT_MODEL` | `openai/whisper-1` | Model slug for OpenRouter mode. |
+| `WHISPER_MODEL` | `tiny` | Model size for local mode. |
+| `MAX_UPLOAD_MB` | `300` | Upload guard (backend accepts large VN/phone exports up to 300 MB). |
+
+**Honest OpenRouter caveats** (from OpenRouter's official STT docs): the endpoint is OpenAI-compatible (`POST https://openrouter.ai/api/v1/audio/transcriptions`, `verbose_json` gives words/segments), **but it ignores the `prompt` field** — so the Roman-script Hinglish biasing that local mode and direct OpenAI mode apply does *not* work there, and Hindi is more likely to come back in Devanagari script. OpenRouter's own multipart cap is **25 MB**, but in backend mode that applies to the *extracted MP3*, not your video: the backend compresses the audio to mono MP3 first, and if even that exceeds ~24 MB (roughly 50+ minutes of audio) it automatically **splits the MP3 into chunks with ffmpeg, transcribes them in order, and re-offsets the word timestamps** — so a 300 MB / long video still works end-to-end. If Roman Hinglish matters most, prefer local mode (the prompt works because faster-whisper takes `initial_prompt`) — OpenRouter mode is a convenience for servers too small to run Whisper.
+
+The **frontend's key-based mode** now has the same choice: the *Direct transcription provider* dropdown switches between **OpenAI** and **OpenRouter** (model `openai/whisper-1`). Your key stays in page memory only, for either provider.
+
+### Deploy the backend
+
+- **Docker (any host):** a `Dockerfile` at the repo root builds the whole service (FFmpeg + backend + frontend). `docker build -t caption-ai . && docker run -p 8000:8000 caption-ai`. Set env vars with `-e`, e.g. `-e WHISPER_MODEL=base` or `-e TRANSCRIBE_PROVIDER=openrouter -e OPENROUTER_API_KEY=...`.
+- **Hugging Face Spaces:** create a Docker Space from this repo — the Dockerfile honours the `PORT` env var (Spaces uses 7860). Free CPU Spaces can run the `tiny`/`base` models.
+- **Render / Railway:** create a Web Service from the repo using the Dockerfile (or Python runtime with start command `uvicorn app:app --app-dir backend --host 0.0.0.0 --port $PORT`), and set the env vars above in the dashboard. Pick an instance with enough RAM for the model (≥1 GB for `tiny`, more for larger models).
+
+Once deployed, GitHub Pages can stay as the free frontend — just point its **Backend URL** field at your deployed backend. Or skip Pages entirely and use the backend's own hosting of the frontend.
+
 ## Whisper key usage & privacy
 
 - The OpenAI API key field is **optional**. Without it, script mode and the demo work fully.
@@ -84,23 +129,46 @@ The core flow is verified end-to-end in a real (headless Chromium) browser, not 
 
 Manual equivalent: serve the folder (`python3 -m http.server 8000`), open the page in Chrome, click **Load Hinglish demo transcript**, load any short MP4, use **Create captions from script**, download the SRT and open it in a text editor, re-import it with **Import SRT**, then **Export video with captions** and play the downloaded `.webm`. Reload the page — your captions should still be there.
 
+### Backend & size-limit tests (2026-10-23)
+
+Verified against the real FastAPI backend with a synthesized Hindi speech clip (Piper TTS: "यार सुनो, आज मैं आपको एक सिंपल ट्रिक बताने वाला हूं, ये बहुत काम की है"):
+
+| Test | Result |
+|---|---|
+| `POST /api/transcribe` (local tiny model) | ✅ `language: "hi"`, 5.48s, Roman-script output: *"Yaar suno, aaj main aapko ek simple trick batane wala hoon…"* (7/9 key words; the tiny model mishears the tail — use `WHISPER_MODEL=base`/`small` for production quality) |
+| `POST /api/burn` | ✅ MP4 back, H.264+AAC; frame diff at a caption moment: 18.8% of bottom-strip pixels changed (captions really burned in) |
+| **257 MB** 1080×1920 / 80s padded VN-style MP4 → transcribe | ✅ Accepted (not size-rejected), transcribed, `duration: 80.016` |
+| Same 257 MB file → `/api/burn` | ✅ Captioned MP4 back in ~33s, 1080×1920 H.264+AAC |
+| Upload over the limit | ✅ HTTP 413 with a clear JSON error (`"File is over the N MB upload limit."`), verified via a 1 MB-limit instance (same guard code as the 300 MB default) |
+| OpenRouter request construction (mocked HTTP, no real key) | ✅ Correct URL, `Bearer` auth from env, `openai/whisper-1`, `verbose_json`, word+segment granularities, no `prompt` field sent |
+| OpenRouter **chunking** (mocked HTTP) | ✅ A 28 MB / 1800s MP3 was auto-split into 2 calls (18.3 MB + 9.2 MB, both < 24 MB cap), later-chunk word timestamps correctly offset (max start 1200.5s), total duration 1799.8s |
+
+Not yet done: a *live* OpenRouter/OpenAI API test (needs a real, funded key) — both are verified only at the request/response-shape level with mocks.
+
+Naive-user browser flow (Playwright + real backend, 2026-10-23): **8/8 passed** — fresh page has no pricing section → upload shows "NEXT STEP → generate captions" guidance → Export with no captions gives a loud, scrolling error instead of silently doing nothing → **Auto-caption** creates 3 cues (language `hi`) → caption text visible on the video overlay during playback → **Export MP4 (backend)** downloads a valid 5.48s MP4 → browser WebM export still downloads too.
+
 ## Roadmap
 
-- Backend Whisper service so users don't need their own key (with upload limits and queueing).
+- ~~Backend Whisper service so users don't need their own key~~ — **done** (see Backend section; upload limits included, queueing still to come).
+- ~~MP4 export via a server-side FFmpeg worker~~ — **done** (`/api/burn`).
+- Job queue + progress polling for long videos on the backend.
 - Devanagari ⇄ Roman transliteration toggle for Hindi/Hinglish captions.
 - VTT import (SRT import is done).
 - Auto punch-in / zoom, silence trimming, and speaker labels.
-- MP4 export via a server-side FFmpeg worker.
 - More Indian language presets and fonts.
 
 ## Project structure
 
 ```
 caption-ai/
-├── index.html   # Landing page + editor markup
-├── styles.css   # All styling, caption themes, responsive layout
-├── app.js       # Player, transcription, cue editor, karaoke, styling, exports
-└── README.md    # This file
+├── index.html          # Landing page + editor markup
+├── styles.css          # All styling, caption themes, responsive layout
+├── app.js              # Player, transcription, cue editor, karaoke, styling, exports
+├── backend/
+│   ├── app.py          # FastAPI service: /api/transcribe, /api/burn, serves the frontend
+│   └── requirements.txt
+├── Dockerfile          # Whole product in one container
+└── README.md           # This file
 ```
 
 ## License

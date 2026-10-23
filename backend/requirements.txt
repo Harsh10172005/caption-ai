@@ -1,0 +1,7 @@
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9
+faster-whisper>=1.0
+# PyAV 15+ removed the metadata_errors kwarg that faster-whisper's audio
+# decoder still passes (open() TypeError) — pin the last compatible line.
+av==14.2.0

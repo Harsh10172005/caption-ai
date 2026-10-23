@@ -14,7 +14,6 @@
   <nav>
     <a href="#editor">Editor</a>
     <a href="#how">How it works</a>
-    <a href="#pricing">Pricing</a>
     <a href="#faq">FAQ</a>
   </nav>
   <a class="btn btn-small" href="#editor">Start captioning</a>
@@ -94,17 +93,35 @@
           <button id="exportSrtBtn" class="btn" type="button">Download SRT</button>
           <button id="exportWordSrtBtn" class="btn" type="button">Download word-level SRT</button>
           <button id="exportVideoBtn" class="btn btn-primary" type="button">Export video with captions (.webm)</button>
-          <p class="hint">Video export renders in real time in Chrome — keep this tab open while it plays through.</p>
+          <button id="exportMp4BackendBtn" class="btn" type="button">Export MP4 (backend)</button>
+          <p class="hint">MP4 export sends your video + captions to the Caption AI backend (below), which burns them in with FFmpeg and returns a real MP4. Needs the backend running.</p>
+          <p class="hint">Video export renders in real time in Chrome — keep this tab open while it plays through. Long videos take as long as they play.</p>
           <progress id="exportProgress" value="0" max="100" hidden></progress>
+          <p class="hint" id="exportProgressText" hidden></p>
+          <button id="exportCancelBtn" class="btn btn-ghost" type="button" hidden>Cancel export</button>
         </fieldset>
       </div>
 
       <!-- Right: controls -->
       <div class="panel controls-panel">
-        <details open>
-          <summary>1 · Transcribe</summary>
+        <details open id="transcribePanel">
+          <summary>1 · Generate captions (do this first)</summary>
           <div class="field">
-            <label for="apiKey">OpenAI API key <span class="hint">(optional, kept only in memory — never saved)</span></label>
+            <label for="backendUrl">Caption AI backend URL <span class="hint">(leave empty if this page was served by the backend itself)</span></label>
+            <input id="backendUrl" type="text" autocomplete="off" placeholder="e.g. http://localhost:8000 — empty = same origin">
+          </div>
+          <button id="autoCaptionBtn" class="btn btn-primary wide" type="button">Auto-caption my video (no key needed)</button>
+          <p class="hint">Uploads your video to the backend, which transcribes it with Whisper on the server and fills the editor automatically. First run can be slow while the model loads.</p>
+          <hr>
+          <div class="field">
+            <label for="apiProvider">Direct transcription provider <span class="hint">(only for the key-based mode below — the Auto-caption button above needs neither)</span></label>
+            <select id="apiProvider">
+              <option value="openai" selected>OpenAI (api.openai.com)</option>
+              <option value="openrouter">OpenRouter (openrouter.ai)</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="apiKey">API key for the provider above <span class="hint">(kept only in memory — never saved; OpenRouter keys start with sk-or-)</span></label>
             <input id="apiKey" type="password" autocomplete="off" placeholder="sk-...">
           </div>
           <div class="field">
@@ -119,7 +136,7 @@
               <option value="ur">Urdu</option>
             </select>
           </div>
-          <button id="transcribeBtn" class="btn btn-primary wide" type="button">Transcribe with Whisper</button>
+          <button id="transcribeBtn" class="btn btn-primary wide" type="button">Transcribe with API key</button>
           <hr>
           <div class="field">
             <label for="scriptInput">No key? Paste your script / transcript</label>
@@ -179,26 +196,15 @@
     </div>
   </section>
 
-  <!-- PRICING -->
-  <section id="pricing" class="pricing">
-    <h2>Simple pricing for every stage</h2>
-    <p class="section-sub">Start free in the browser. Paid plans are for creators who want hosted processing, longer videos, and team workflows.</p>
-    <div class="price-grid">
-      <article class="price-card"><h3>Free</h3><p class="price">₹0</p><ul><li>Browser editor &amp; demo</li><li>SRT + word-level SRT export</li><li>Bring your own Whisper key</li><li>Short clips</li></ul><a class="btn wide" href="#editor">Start free</a></article>
-      <article class="price-card"><h3>Lite</h3><p class="price">₹299<span>/mo</span></p><ul><li>For new creators</li><li>More monthly exports</li><li>All caption themes</li><li>Priority rendering queue</li></ul><a class="btn wide" href="#editor">Choose Lite</a></article>
-      <article class="price-card featured"><h3>Pro</h3><p class="price">₹799<span>/mo</span></p><ul><li>For daily posters</li><li>Longer videos</li><li>Hosted transcription included</li><li>Custom fonts &amp; brand colours</li></ul><a class="btn btn-primary wide" href="#editor">Choose Pro</a></article>
-      <article class="price-card"><h3>Agency</h3><p class="price">₹1999<span>/mo</span></p><ul><li>For teams &amp; clients</li><li>Multiple workspaces</li><li>Bulk exports</li><li>Team support</li></ul><a class="btn wide" href="#editor">Choose Agency</a></article>
-    </div>
-  </section>
-
   <!-- FAQ -->
   <section id="faq" class="faq">
     <h2>Questions creators ask</h2>
-    <details><summary>Does my video leave my device?</summary><p>Not by default. The editor, styling, and video export all run locally in your browser. Only if you press “Transcribe with Whisper” is the file sent to OpenAI using your own key.</p></details>
+    <details><summary>Does my video leave my device?</summary><p>Only when you ask it to. Editing, styling, SRT export and the browser WebM export all run locally. Your video is sent only when you press “Auto-caption my video” / “Export MP4 (backend)” (to your Caption AI backend) or “Transcribe with API key” (to OpenAI/OpenRouter, using your own key).</p></details>
     <details><summary>Why Roman script for Hinglish?</summary><p>Most short-form captions in India are read in Roman script because that's how people type and chat every day. Roman Hinglish keeps the mix of Hindi and English natural and easy to scan on a phone.</p></details>
     <details><summary>What if the transcription makes a mistake?</summary><p>It will, sometimes — especially with names, slang, or fast speech. That's why every cue is editable. Click a caption, fix the words, and the preview and exports update instantly.</p></details>
     <details><summary>Why is Whisper limited to 25 MB?</summary><p>That's OpenAI's upload limit for the transcription endpoint. For longer videos, compress the clip, trim it, or paste a script instead — script mode has no size limit.</p></details>
-    <details><summary>What format is the exported video?</summary><p>The browser export produces a WebM file with captions burned in, which plays in Chrome and uploads to most platforms. If you need MP4, convert the WebM with any free converter, or use the SRT files in your main editor.</p></details>
+    <details><summary>What format is the exported video?</summary><p>Two ways: the browser export produces a WebM file with captions burned in (Chrome, renders in real time). Or use <strong>Export MP4 (backend)</strong> — the backend burns the captions in with FFmpeg and returns a real MP4, ready for Instagram/YouTube.</p></details>
+    <details><summary>How does Auto-caption work without an API key?</summary><p>The Caption AI backend runs Whisper on the server itself. Your video is uploaded to that backend, transcribed there, and the captions come back to this editor — no OpenAI key and no pasting scripts. Run it locally or deploy it (see the README) and point the Backend URL field at it; if this page was served by the backend, it just works.</p></details>
     <details><summary>Do you store my API key?</summary><p>No. Your key lives only in the page's memory while the tab is open. Refresh the page and it's gone. It is never written to localStorage, cookies, or any server by this app.</p></details>
   </section>
 </main>
