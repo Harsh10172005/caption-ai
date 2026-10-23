@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Caption AI — Hinglish Captions for Talking-Head Videos</title>
+<meta name="description" content="Upload a talking-head video, transcribe Hinglish audio, edit and style captions, and export reels with burned-in subtitles.">
+<link rel="stylesheet" href="styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💬</text></svg>">
+</head>
+<body>
+<header class="site-header">
+  <a class="logo" href="#top">Caption <span>AI</span></a>
+  <nav>
+    <a href="#editor">Editor</a>
+    <a href="#how">How it works</a>
+    <a href="#pricing">Pricing</a>
+    <a href="#faq">FAQ</a>
+  </nav>
+  <a class="btn btn-small" href="#editor">Start captioning</a>
+</header>
+
+<main id="top">
+  <!-- HERO -->
+  <section class="hero">
+    <div class="hero-copy">
+      <p class="eyebrow">Built for creators who speak like real life</p>
+      <h1>Turn talking-head videos into reels people actually watch till the end</h1>
+      <p class="lead">Drop in a video where you mix Hindi and English, get captions that follow your words, style them your way, and export a reel that's ready to post — no complicated timeline editor needed.</p>
+      <div class="hero-actions">
+        <a class="btn btn-primary" href="#editor">Upload your video</a>
+        <button class="btn btn-ghost" id="heroDemoBtn" type="button">Try the demo first</button>
+      </div>
+      <div class="lang-chips" aria-label="Supported languages">
+        <span class="chip active">Hinglish</span><span class="chip">Hindi</span><span class="chip">English</span>
+        <span class="chip">Tamil</span><span class="chip">Telugu</span><span class="chip">Bengali</span>
+        <span class="chip">Marathi</span><span class="chip">Gujarati</span><span class="chip">Kannada</span>
+        <span class="chip">Malayalam</span><span class="chip">Punjabi</span><span class="chip">Urdu</span>
+        <span class="chip muted">+ more on request</span>
+      </div>
+    </div>
+    <div class="hero-visual" aria-hidden="true">
+      <div class="phone-mock">
+        <div class="phone-screen">
+          <div class="mock-face">🎙️</div>
+          <div class="mock-caption"><span>yaar, ye trick</span> <strong>game changer</strong> <span>hai</span></div>
+        </div>
+        <div class="phone-bar"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- HOW -->
+  <section id="how" class="steps">
+    <h2>From raw clip to captioned reel in three steps</h2>
+    <div class="step-grid">
+      <article><span class="step-num">1</span><h3>Upload video</h3><p>Pick an MP4 or WebM talking-head clip. It stays in your browser — nothing is uploaded unless you choose AI transcription.</p></article>
+      <article><span class="step-num">2</span><h3>AI reads your Hinglish</h3><p>Use your own Whisper key for automatic transcription in Roman script, or paste a script and let the editor time it for you.</p></article>
+      <article><span class="step-num">3</span><h3>Edit &amp; export</h3><p>Fix words, pick a caption style, preview the word-by-word highlight, then download SRT files or a video with captions burned in.</p></article>
+    </div>
+  </section>
+
+  <!-- EDITOR -->
+  <section id="editor" class="editor-section">
+    <div class="editor-head">
+      <h2>Caption editor</h2>
+      <p id="status" class="status" role="status" aria-live="polite">Ready. Load the demo, drop a video, or paste a transcript to begin.</p>
+      <p class="hint">Your captions and caption style <strong>autosave in this browser</strong> as you work and are restored when you come back. Your OpenAI API key is never saved.</p>
+    </div>
+
+    <div class="editor-layout">
+      <!-- Left: player -->
+      <div class="panel player-panel">
+        <div id="dropZone" class="drop-zone" tabindex="0">
+          <p><strong>Drag &amp; drop video here</strong><br>or</p>
+          <label class="btn btn-primary file-label">Choose video file
+            <input id="videoInput" type="file" accept="video/mp4,video/webm,video/*" hidden>
+          </label>
+          <p class="hint">MP4 / WebM works best. For Whisper, keep it under 25 MB.</p>
+          <p id="fileInfo" class="file-info"></p>
+        </div>
+
+        <div class="stage">
+          <video id="video" controls playsinline></video>
+          <div id="captionOverlay" class="caption-overlay pos-bottom"><span id="captionText">Your captions will appear here</span></div>
+        </div>
+        <div class="player-actions">
+          <button id="playPauseBtn" class="btn btn-ghost" type="button">Play / Pause</button>
+          <span id="timeLabel" class="time-label">0:00 / 0:00</span>
+        </div>
+
+        <fieldset class="export-box">
+          <legend>Export</legend>
+          <button id="exportSrtBtn" class="btn" type="button">Download SRT</button>
+          <button id="exportWordSrtBtn" class="btn" type="button">Download word-level SRT</button>
+          <button id="exportVideoBtn" class="btn btn-primary" type="button">Export video with captions (.webm)</button>
+          <p class="hint">Video export renders in real time in Chrome — keep this tab open while it plays through.</p>
+          <progress id="exportProgress" value="0" max="100" hidden></progress>
+        </fieldset>
+      </div>
+
+      <!-- Right: controls -->
+      <div class="panel controls-panel">
+        <details open>
+          <summary>1 · Transcribe</summary>
+          <div class="field">
+            <label for="apiKey">OpenAI API key <span class="hint">(optional, kept only in memory — never saved)</span></label>
+            <input id="apiKey" type="password" autocomplete="off" placeholder="sk-...">
+          </div>
+          <div class="field">
+            <label for="languageSelect">Language hint</label>
+            <select id="languageSelect">
+              <option value="">Auto / Hinglish mix</option>
+              <option value="hi">Hindi</option><option value="en">English</option>
+              <option value="ta">Tamil</option><option value="te">Telugu</option>
+              <option value="bn">Bengali</option><option value="mr">Marathi</option>
+              <option value="gu">Gujarati</option><option value="kn">Kannada</option>
+              <option value="ml">Malayalam</option><option value="pa">Punjabi</option>
+              <option value="ur">Urdu</option>
+            </select>
+          </div>
+          <button id="transcribeBtn" class="btn btn-primary wide" type="button">Transcribe with Whisper</button>
+          <hr>
+          <div class="field">
+            <label for="scriptInput">No key? Paste your script / transcript</label>
+            <textarea id="scriptInput" rows="5" placeholder="Yaar suno, aaj main aapko ek aisi trick batane wala hoon jo literally game changer hai..."></textarea>
+          </div>
+          <button id="scriptBtn" class="btn wide" type="button">Create captions from script</button>
+          <button id="demoBtn" class="btn btn-ghost wide" type="button">Load Hinglish demo transcript</button>
+        </details>
+
+        <details open>
+          <summary>2 · Style captions</summary>
+          <div class="field">
+            <label>Theme preset</label>
+            <div class="preset-row">
+              <button class="btn preset" data-preset="clean" type="button">Clean</button>
+              <button class="btn preset" data-preset="bold-yellow" type="button">Bold Yellow</button>
+              <button class="btn preset" data-preset="high-energy" type="button">High Energy</button>
+              <button class="btn preset" data-preset="minimal" type="button">Minimal</button>
+            </div>
+          </div>
+          <div class="field">
+            <label for="fontSize">Font size: <span id="fontSizeVal">28</span>px</label>
+            <input id="fontSize" type="range" min="16" max="52" value="28">
+          </div>
+          <div class="field inline">
+            <label for="textColor">Text colour</label>
+            <input id="textColor" type="color" value="#ffffff">
+            <label for="highlightColor">Highlight colour</label>
+            <input id="highlightColor" type="color" value="#ffd60a">
+          </div>
+          <div class="field inline">
+            <label><input id="bgToggle" type="checkbox" checked> Background box</label>
+            <label><input id="highlightToggle" type="checkbox" checked> Highlight current word</label>
+          </div>
+          <div class="field">
+            <label for="positionSelect">Position</label>
+            <select id="positionSelect">
+              <option value="bottom" selected>Bottom</option>
+              <option value="middle">Middle</option>
+              <option value="top">Top</option>
+            </select>
+          </div>
+        </details>
+
+        <details open>
+          <summary>3 · Edit captions <span class="hint">(click a cue to jump there)</span></summary>
+          <div class="cue-actions">
+            <button id="addCueBtn" class="btn btn-small" type="button">+ Add cue at playhead</button>
+            <label class="btn btn-small" for="srtInput">Import SRT</label>
+            <input id="srtInput" type="file" accept=".srt,text/plain" hidden>
+            <button id="clearCuesBtn" class="btn btn-small btn-ghost" type="button">Clear all</button>
+          </div>
+          <p class="hint">Import SRT brings captions in from another tool — you can then restyle them and burn them into your video.</p>
+          <div id="cueList" class="cue-list"><p class="hint">No captions yet.</p></div>
+        </details>
+      </div>
+    </div>
+  </section>
+
+  <!-- PRICING -->
+  <section id="pricing" class="pricing">
+    <h2>Simple pricing for every stage</h2>
+    <p class="section-sub">Start free in the browser. Paid plans are for creators who want hosted processing, longer videos, and team workflows.</p>
+    <div class="price-grid">
+      <article class="price-card"><h3>Free</h3><p class="price">₹0</p><ul><li>Browser editor &amp; demo</li><li>SRT + word-level SRT export</li><li>Bring your own Whisper key</li><li>Short clips</li></ul><a class="btn wide" href="#editor">Start free</a></article>
+      <article class="price-card"><h3>Lite</h3><p class="price">₹299<span>/mo</span></p><ul><li>For new creators</li><li>More monthly exports</li><li>All caption themes</li><li>Priority rendering queue</li></ul><a class="btn wide" href="#editor">Choose Lite</a></article>
+      <article class="price-card featured"><h3>Pro</h3><p class="price">₹799<span>/mo</span></p><ul><li>For daily posters</li><li>Longer videos</li><li>Hosted transcription included</li><li>Custom fonts &amp; brand colours</li></ul><a class="btn btn-primary wide" href="#editor">Choose Pro</a></article>
+      <article class="price-card"><h3>Agency</h3><p class="price">₹1999<span>/mo</span></p><ul><li>For teams &amp; clients</li><li>Multiple workspaces</li><li>Bulk exports</li><li>Team support</li></ul><a class="btn wide" href="#editor">Choose Agency</a></article>
+    </div>
+  </section>
+
+  <!-- FAQ -->
+  <section id="faq" class="faq">
+    <h2>Questions creators ask</h2>
+    <details><summary>Does my video leave my device?</summary><p>Not by default. The editor, styling, and video export all run locally in your browser. Only if you press “Transcribe with Whisper” is the file sent to OpenAI using your own key.</p></details>
+    <details><summary>Why Roman script for Hinglish?</summary><p>Most short-form captions in India are read in Roman script because that's how people type and chat every day. Roman Hinglish keeps the mix of Hindi and English natural and easy to scan on a phone.</p></details>
+    <details><summary>What if the transcription makes a mistake?</summary><p>It will, sometimes — especially with names, slang, or fast speech. That's why every cue is editable. Click a caption, fix the words, and the preview and exports update instantly.</p></details>
+    <details><summary>Why is Whisper limited to 25 MB?</summary><p>That's OpenAI's upload limit for the transcription endpoint. For longer videos, compress the clip, trim it, or paste a script instead — script mode has no size limit.</p></details>
+    <details><summary>What format is the exported video?</summary><p>The browser export produces a WebM file with captions burned in, which plays in Chrome and uploads to most platforms. If you need MP4, convert the WebM with any free converter, or use the SRT files in your main editor.</p></details>
+    <details><summary>Do you store my API key?</summary><p>No. Your key lives only in the page's memory while the tab is open. Refresh the page and it's gone. It is never written to localStorage, cookies, or any server by this app.</p></details>
+  </section>
+</main>
+
+<footer>
+  <p><strong>Caption AI</strong> — Hinglish-first captions for talking-head creators.</p>
+  <p class="hint">Static demo app. Runs entirely in your browser except optional Whisper transcription via your own OpenAI key.</p>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>
