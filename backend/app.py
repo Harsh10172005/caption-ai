@@ -113,11 +113,24 @@ def json_error(message, status=400):
     return JSONResponse({"ok": False, "error": message}, status_code=status)
 
 
-def run(cmd):
-    """Run a command, return (ok, stderr_tail)."""
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+def run(cmd, timeout=None):
+    """Run a command, return (ok, stderr_tail). Logs start/finish so slow
+    steps (ffmpeg encodes on small instances) are visible in server logs."""
+    import time
+    label = cmd[0] if cmd else "cmd"
+    print(f"[run] start: {' '.join(map(str, cmd))[:200]}", flush=True)
+    started = time.time()
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        print(f"[run] TIMEOUT after {timeout}s: {label}", flush=True)
+        return False, f"{label} timed out after {timeout}s on the server."
+    elapsed = time.time() - started
     if proc.returncode != 0:
-        return False, (proc.stderr or "")[-800:]
+        tail = (proc.stderr or "")[-800:]
+        print(f"[run] FAILED in {elapsed:.1f}s rc={proc.returncode}: {tail[-300:]}", flush=True)
+        return False, tail
+    print(f"[run] ok in {elapsed:.1f}s: {label}", flush=True)
     return True, ""
 
 
@@ -451,13 +464,16 @@ def burn(
         f"Alignment={alignment},MarginV={margin_v}"
     )
     vf = f"subtitles={srt_path}:force_style='{force_style}'"
+    # ultrafast: on CPU-capped free tiers (e.g. Render free = 0.15 CPU) the
+    # encode is the bottleneck; veryfast made short burns exceed any sane
+    # client timeout. ultrafast is several times faster at a larger file size.
     ok, err = run([
         "ffmpeg", "-y", "-v", "error", "-i", str(video_path),
         "-vf", vf,
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23", "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart",
         str(out_path),
-    ])
+    ], timeout=1500)
     if not ok or not out_path.exists():
         shutil.rmtree(tmp, ignore_errors=True)
         return json_error("ffmpeg could not burn the captions into that video. " + err, status=422)
