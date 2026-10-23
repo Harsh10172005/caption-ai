@@ -361,8 +361,10 @@ GEMINI_PROMPT = (
     "in Roman (Latin) script only, exactly as it sounds: Hindi words in Roman "
     "letters (for example: yaar, bahut accha, matlab, aaj main aapko batane "
     "wala hoon), never in Devanagari script. Skip music and silence. Break "
-    "the transcript into short segments of roughly 1 to 5 seconds at natural "
-    "pauses, each with its start and end time in seconds. Reply with JSON "
+    "the transcript into SHORT segments of roughly 1 to 3 seconds at natural "
+    "pauses \u2014 end each segment at a pause, and never stretch one segment "
+    "across a silence or music. Each segment needs its start and end time "
+    "in seconds. Reply with JSON "
     "only, in this shape: "
     "{\"segments\": [{\"start\": 0.0, \"end\": 2.5, \"text\": \"...\"}]}"
 )
@@ -456,6 +458,16 @@ def _gemini_parse_segments(data):
             end = start + 0.5
         segments.append({"start": round(start, 3), "end": round(end, 3), "text": txt})
     segments.sort(key=lambda sgm: sgm["start"])
+    # Gemini's timestamps can overlap slightly between neighbouring
+    # segments; clamp each start to the previous end so captions never
+    # fight each other on screen.
+    prev_end = 0.0
+    for sgm in segments:
+        if sgm["start"] < prev_end:
+            sgm["start"] = prev_end
+        if sgm["end"] <= sgm["start"]:
+            sgm["end"] = round(sgm["start"] + 0.4, 3)
+        prev_end = sgm["end"]
     return segments
 
 
@@ -928,6 +940,191 @@ def cancel_job(job_id: str):
     return _job_view(job)
 
 
+def _burn_vf(srt_path, fontsize, color, position):
+    """The ffmpeg subtitles-filter argument shared by /api/burn and the
+    burn jobs, so both render identically styled captions."""
+    def hex_to_ass(value):
+        m = re.fullmatch(r"#?([0-9a-fA-F]{6})", (value or "").strip())
+        if not m:
+            return "&HFFFFFF"
+        r, g, b = (m.group(1)[i:i + 2] for i in (0, 2, 4))
+        return f"&H{b}{g}{r}".upper()
+
+    alignment = {"bottom": 2, "middle": 5, "top": 8}.get((position or "bottom").lower(), 2)
+    margin_v = 36 if alignment != 5 else 0
+    force_style = (
+        f"FontName=DejaVu Sans,FontSize={max(10, min(60, int(fontsize)))},"
+        f"PrimaryColour={hex_to_ass(color)},OutlineColour=&H99000000,"
+        f"BorderStyle=1,Outline=2,Shadow=0,Bold=1,"
+        f"Alignment={alignment},MarginV={margin_v}"
+    )
+    return f"subtitles={srt_path}:force_style='{force_style}'"
+
+
+# ------------------------------------------------------------- burn jobs ---
+# Rendering a captioned MP4 on a CPU-capped free server takes minutes, so
+# a single blocking request feels broken (and can die at a proxy). Burn
+# jobs render in a background thread while ffmpeg's own -progress output
+# is streamed and turned into a MEASURED percentage (encoded seconds /
+# total seconds) that the page polls; at 100% the page downloads the file.
+_burn_jobs = {}
+_burn_jobs_lock = threading.Lock()
+
+
+def _get_burn_job(job_id):
+    with _burn_jobs_lock:
+        job = _burn_jobs.get(job_id)
+        if job is None:
+            return None
+        if job["finished_at"] and time.time() - job["finished_at"] > JOB_TTL_SECONDS:
+            shutil.rmtree(job["tmp"], ignore_errors=True)
+            del _burn_jobs[job_id]
+            return None
+        return job
+
+
+def _burn_view(job):
+    return {
+        "ok": True,
+        "job_id": job["id"],
+        "status": job["status"],
+        "progress_percentage": job["progress"],
+        "message": job["message"],
+        "error": job["error"],
+    }
+
+
+def _run_burn_job(job, video_path, srt_path, out_path, vf, tmp):
+    try:
+        duration = probe_duration(video_path)
+        cmd = [
+            "ffmpeg", "-y", "-v", "error", "-i", str(video_path),
+            "-vf", vf,
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart",
+            "-progress", "pipe:1", "-nostats",
+            str(out_path),
+        ]
+        print(f"[burn] start job {job['id'][:8]} duration={duration}", flush=True)
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True)
+        job["proc"] = proc
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            if job["cancel"].is_set():
+                proc.terminate()
+                break
+            if line.startswith("out_time_us=") and duration > 0:
+                try:
+                    done_s = int(line.split("=", 1)[1]) / 1_000_000
+                except ValueError:
+                    continue
+                pct = int(max(0.0, min(99.0, done_s / duration * 100)))
+                if pct != job["progress"]:
+                    with _burn_jobs_lock:
+                        job["progress"] = pct
+                        job["message"] = f"Rendering your captioned video\u2026 {pct}%"
+        proc.wait(timeout=1800)
+        err_tail = ""
+        try:
+            err_tail = (proc.stderr.read() or "")[-300:] if proc.stderr else ""
+        except Exception:
+            pass
+        with _burn_jobs_lock:
+            if job["cancel"].is_set():
+                job.update(status="cancelled", message="Rendering cancelled.")
+            elif proc.returncode == 0 and out_path.exists():
+                job.update(status="completed", progress=100,
+                           message="Your captioned video is ready.")
+            else:
+                job.update(status="failed",
+                           message="Rendering failed.",
+                           error="ffmpeg could not burn the captions into that video. " + err_tail)
+            job["finished_at"] = time.time()
+        print(f"[burn] job {job['id'][:8]} -> {job['status']}", flush=True)
+    except Exception as exc:
+        with _burn_jobs_lock:
+            job.update(status="failed", message="Rendering failed.",
+                       error=f"Rendering failed: {exc}",
+                       finished_at=time.time())
+
+
+@app.post("/api/burn-jobs")
+def create_burn_job(
+    file: UploadFile = File(...),
+    srt: str = Form(...),
+    fontsize: int = Form(24),
+    color: str = Form("#ffffff"),
+    position: str = Form("bottom"),
+):
+    if not srt.strip():
+        return json_error("No SRT content was provided.")
+    tmp = Path(tempfile.mkdtemp(prefix="captionai-burnjob-"))
+    suffix = Path(file.filename or "video.mp4").suffix or ".mp4"
+    video_path = tmp / f"input{suffix}"
+    try:
+        size = save_upload(file, video_path)
+    except ValueError as exc:
+        shutil.rmtree(tmp, ignore_errors=True)
+        return json_error(str(exc), status=413)
+    if size == 0:
+        shutil.rmtree(tmp, ignore_errors=True)
+        return json_error("The uploaded file was empty.")
+    srt_path = tmp / "subs.srt"
+    srt_path.write_text(srt, encoding="utf-8")
+    job_id = uuid.uuid4().hex
+    job = {
+        "id": job_id, "status": "processing", "progress": 0,
+        "message": "Rendering your captioned video\u2026",
+        "error": None, "created_at": time.time(), "finished_at": None,
+        "cancel": threading.Event(), "proc": None, "tmp": tmp,
+        "out_path": tmp / "captioned.mp4",
+    }
+    with _burn_jobs_lock:
+        _burn_jobs[job_id] = job
+    threading.Thread(
+        target=_run_burn_job,
+        args=(job, video_path, srt_path, job["out_path"],
+              _burn_vf(srt_path, fontsize, color, position), tmp),
+        daemon=True).start()
+    return {"ok": True, "job_id": job_id, "status": "processing"}
+
+
+@app.get("/api/burn-jobs/{job_id}")
+def get_burn_job(job_id: str):
+    job = _get_burn_job(job_id)
+    if job is None:
+        return json_error("Render job not found \u2014 it may have expired (finished renders are kept for about 30 minutes).", status=404)
+    return _burn_view(job)
+
+
+@app.post("/api/burn-jobs/{job_id}/cancel")
+def cancel_burn_job(job_id: str):
+    job = _get_burn_job(job_id)
+    if job is None:
+        return json_error("Render job not found \u2014 it may have expired.", status=404)
+    if job["status"] == "processing":
+        job["cancel"].set()
+        if job.get("proc") is not None:
+            try:
+                job["proc"].terminate()
+            except Exception:
+                pass
+    return _burn_view(job)
+
+
+@app.get("/api/burn-jobs/{job_id}/file")
+def get_burn_file(job_id: str):
+    job = _get_burn_job(job_id)
+    if job is None:
+        return json_error("Render job not found \u2014 it may have expired.", status=404)
+    if job["status"] != "completed" or not job["out_path"].exists():
+        return json_error("The captioned video is not ready yet.", status=409)
+    return FileResponse(job["out_path"], media_type="video/mp4",
+                        filename="captioned-video.mp4")
+
+
 @app.post("/api/burn")
 def burn(
     file: UploadFile = File(...),
@@ -953,23 +1150,7 @@ def burn(
     srt_path = tmp / "subs.srt"
     srt_path.write_text(srt, encoding="utf-8")
     out_path = tmp / "captioned.mp4"
-
-    def hex_to_ass(value):
-        m = re.fullmatch(r"#?([0-9a-fA-F]{6})", (value or "").strip())
-        if not m:
-            return "&HFFFFFF"
-        r, g, b = (m.group(1)[i:i + 2] for i in (0, 2, 4))
-        return f"&H{b}{g}{r}".upper()
-
-    alignment = {"bottom": 2, "middle": 5, "top": 8}.get((position or "bottom").lower(), 2)
-    margin_v = 36 if alignment != 5 else 0
-    force_style = (
-        f"FontName=DejaVu Sans,FontSize={max(10, min(60, int(fontsize)))},"
-        f"PrimaryColour={hex_to_ass(color)},OutlineColour=&H99000000,"
-        f"BorderStyle=1,Outline=2,Shadow=0,Bold=1,"
-        f"Alignment={alignment},MarginV={margin_v}"
-    )
-    vf = f"subtitles={srt_path}:force_style='{force_style}'"
+    vf = _burn_vf(srt_path, fontsize, color, position)
     # ultrafast: on CPU-capped free tiers (e.g. Render free = 0.15 CPU) the
     # encode is the bottleneck; veryfast made short burns exceed any sane
     # client timeout. ultrafast is several times faster at a larger file size.

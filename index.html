@@ -173,13 +173,13 @@
           <fieldset class="export-box">
             <legend>Export your captioned video</legend>
             <button id="exportMp4BackendBtn" class="btn btn-primary wide" type="button">Download captioned MP4</button>
-            <p class="hint">The finished video: the caption server burns your captions into a real MP4, ready for Instagram / YouTube.</p>
+            <p class="hint">The finished video: the caption server burns your captions into a real MP4, ready for Instagram / YouTube. Rendering shows live progress below, and the download starts automatically when it's ready.</p>
+            <progress id="exportProgress" value="0" max="100" hidden></progress>
+            <p class="hint" id="exportProgressText" hidden></p>
             <button id="exportSrtBtn" class="btn" type="button">Download SRT</button>
             <button id="exportWordSrtBtn" class="btn" type="button">Download word-level SRT</button>
             <button id="exportVideoBtn" class="btn" type="button">Browser export (.webm)</button>
             <p class="hint">Browser export renders in real time in Chrome — keep this tab open while it plays through. Long videos take as long as they play.</p>
-            <progress id="exportProgress" value="0" max="100" hidden></progress>
-            <p class="hint" id="exportProgressText" hidden></p>
             <button id="exportCancelBtn" class="btn btn-ghost" type="button" hidden>Cancel export</button>
           </fieldset>
         </div>

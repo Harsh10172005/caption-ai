@@ -764,20 +764,40 @@ function tryReattach() {
   pollJob();
 }
 
+/* ---------- Export: captioned MP4 via a backend render job ---------- */
+// Rendering on the server takes minutes on a free CPU, so it runs as a
+// job: the page polls the server's measured render percentage, shows it
+// in the progress bar, and downloads the MP4 automatically at 100%.
+// The button is never disabled: while rendering, tapping it re-shows
+// the current percentage instead of feeling dead.
+const burnState = { active: false, jobId: null, pct: 0 };
 $("exportMp4BackendBtn").addEventListener("click", async () => {
+  const btn = $("exportMp4BackendBtn");
+  if (burnState.active) {
+    const bar = $("exportProgress");
+    bar.hidden = false; $("exportProgressText").hidden = false;
+    if (bar.scrollIntoView) bar.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    setStatus(`Still rendering your captioned video\u2026 ${burnState.pct}% \u2014 the download starts automatically at 100%.`);
+    return;
+  }
   if (!videoFile) {
-    setStatus("Re-select your video file first (the box at the top of this screen) — the captioned MP4 is made from your original clip, and browsers can't restore the file automatically.", "error");
+    setStatus("Re-select your video file first (the box at the top of this screen) \u2014 the captioned MP4 is made from your original clip, and browsers can't restore the file automatically.", "error");
     const rb = $("reselectBox");
     rb.scrollIntoView({ block: "center", behavior: "smooth" });
     rb.classList.remove("attention"); void rb.offsetWidth; rb.classList.add("attention");
     setTimeout(() => rb.classList.remove("attention"), 3600);
     return;
   }
-  if (videoFile.size > BACKEND_MAX_MB * 1024 * 1024) { setStatus(`⚠️ This video is ${(videoFile.size / 1048576).toFixed(0)} MB — over the backend's ${BACKEND_MAX_MB} MB limit. Please trim or compress it first.`, "error"); return; }
+  if (videoFile.size > BACKEND_MAX_MB * 1024 * 1024) { setStatus(`\u26a0\ufe0f This video is ${(videoFile.size / 1048576).toFixed(0)} MB \u2014 over the backend's ${BACKEND_MAX_MB} MB limit. Please trim or compress it first.`, "error"); return; }
   if (!requireCues("Backend MP4 export")) return;
   const base = backendBase();
-  const btn = $("exportMp4BackendBtn"); btn.disabled = true;
-  setStatus("Sending video + captions to the backend to burn in… you'll get a captioned MP4 back.");
+  const bar = $("exportProgress"), txt = $("exportProgressText");
+  burnState.active = true; burnState.pct = 0; burnState.jobId = null;
+  bar.hidden = false; bar.value = 0; txt.hidden = false;
+  txt.textContent = "Uploading your video to the caption server\u2026";
+  btn.textContent = "Rendering\u2026 0%";
+  setStatus("Sending video + captions to the server to render your captioned MP4\u2026");
+  const restoreBtn = () => { btn.textContent = "Download captioned MP4"; };
   try {
     const form = new FormData();
     form.append("file", videoFile, videoFile.name);
@@ -785,13 +805,50 @@ $("exportMp4BackendBtn").addEventListener("click", async () => {
     form.append("fontsize", String(Math.max(14, Math.round(style.size * 0.85))));
     form.append("color", style.color);
     form.append("position", style.pos);
-    const res = await fetch(base + "/api/burn", { method: "POST", body: form });
+    const res = await fetch(base + "/api/burn-jobs", { method: "POST", body: form });
     if (!res.ok) throw new Error(await parseBackendError(res));
-    download("captioned-video.mp4", await res.blob());
-    setStatus("Done — downloaded captioned-video.mp4 with burned-in captions, made by the backend.", "ok");
+    const created = await res.json();
+    burnState.jobId = created.job_id;
+    let misses = 0;
+    while (true) {
+      await new Promise((r) => setTimeout(r, 1500));
+      let v;
+      try {
+        const pr = await fetch(base + "/api/burn-jobs/" + burnState.jobId);
+        if (!pr.ok) throw new Error(await parseBackendError(pr));
+        v = await pr.json();
+        misses = 0;
+      } catch (e) {
+        if (++misses >= 5) throw e;
+        continue;
+      }
+      if (v.status === "processing") {
+        const pct = typeof v.progress_percentage === "number" ? v.progress_percentage : 0;
+        burnState.pct = pct;
+        bar.value = pct;
+        btn.textContent = `Rendering\u2026 ${pct}%`;
+        txt.textContent = `Rendering your captioned video\u2026 ${pct}% \u2014 the download starts automatically at 100%.`;
+        continue;
+      }
+      if (v.status === "completed") {
+        bar.value = 100; burnState.pct = 100;
+        btn.textContent = "Rendering\u2026 100%";
+        txt.textContent = "Rendering complete \u2014 downloading your captioned video\u2026";
+        const fr = await fetch(base + "/api/burn-jobs/" + burnState.jobId + "/file");
+        if (!fr.ok) throw new Error(await parseBackendError(fr));
+        download("captioned-video.mp4", await fr.blob());
+        txt.textContent = "Done \u2014 your captioned MP4 has downloaded.";
+        burnState.active = false; restoreBtn();
+        setStatus("Done \u2014 downloaded captioned-video.mp4 with burned-in captions, made by the backend.", "ok");
+        return;
+      }
+      throw new Error(v.error || "Rendering failed on the server.");
+    }
   } catch (err) {
-    setStatus("Backend MP4 export failed: " + (err && err.message ? err.message : err) + " — the caption server may be unreachable (check the override in Advanced options), or use the browser WebM export instead.", "error");
-  } finally { btn.disabled = false; }
+    burnState.active = false; restoreBtn();
+    txt.textContent = "";
+    setStatus("Backend MP4 export failed: " + (err && err.message ? err.message : err) + " \u2014 tap Download captioned MP4 to try again, or use the browser WebM export instead.", "error");
+  }
 });
 
 /* ---------- Transcription: script fallback + demo ---------- */
@@ -934,6 +991,7 @@ function seekToStart() {
   });
 }
 $("exportVideoBtn").addEventListener("click", async () => {
+  if (typeof burnState !== "undefined" && burnState.active) { setStatus("The server is still rendering your MP4 \u2014 wait for that download to finish first.", "error"); return; }
   if (!video.src) { setStatus("Load a video first — in-browser export needs a real clip to render.", "error"); return; }
   if (!requireCues("Video export")) return;
   // Detect an unsupported export environment UP FRONT, with a specific way
