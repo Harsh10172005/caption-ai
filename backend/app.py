@@ -56,6 +56,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -420,6 +421,249 @@ def transcribe(file: UploadFile = File(...), language: str = Form("")):
         return json_error(f"Transcription failed: {exc}", status=500)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ---------------------------------------------------------------- jobs -----
+# Job-based transcription with REAL progress. POST /api/jobs stores the
+# upload, returns a job_id immediately, and a background thread runs the
+# same pipeline as /api/transcribe — except the faster-whisper segment
+# generator is consumed step by step, so progress is MEASURED from the
+# audio itself (last segment end / total duration), never from a timer.
+# Stage bands: preparing 2-10%, transcribing 10-80% (segment-measured),
+# generating_captions 80-92%, preparing_editor 92-99%, completed = 100
+# only when the result payload is ready. For the OpenRouter provider
+# there is no segment stream, so transcribing progress is null
+# (indeterminate) rather than invented.
+JOB_TTL_SECONDS = 30 * 60
+_jobs = {}
+_jobs_lock = threading.Lock()
+_transcribe_lock = threading.Lock()
+
+JOB_STAGES = ["uploaded", "preparing", "transcribing",
+              "generating_captions", "preparing_editor", "completed"]
+
+
+def _job_view(job):
+    now = time.time()
+    end = job["finished_at"] or now
+    return {
+        "ok": True,
+        "job_id": job["id"],
+        "status": job["status"],
+        "stage": job["stage"],
+        "progress_percentage": job["progress"],
+        "elapsed_seconds": round(end - job["created_at"], 1),
+        "estimated_remaining_seconds": job["eta"] if job["status"] == "processing" else None,
+        "message": job["message"],
+        "error": job["error"],
+        "result": job["result"] if job["status"] == "completed" else None,
+    }
+
+
+def _get_job(job_id):
+    """Fetch a job, lazily expiring finished jobs after the TTL."""
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        if job is None:
+            return None
+        if job["finished_at"] and time.time() - job["finished_at"] > JOB_TTL_SECONDS:
+            del _jobs[job_id]
+            return None
+        return job
+
+
+def _set(job, **kw):
+    with _jobs_lock:
+        job.update(kw)
+
+
+def _finish(job, status, stage, message, error=None):
+    _set(job, status=status, stage=stage, message=message, error=error,
+         eta=None, finished_at=time.time())
+
+
+def _run_job(job, video_path, language, tmp):
+    """Worker thread: preparing -> transcribing -> generating_captions
+    -> preparing_editor -> completed (or failed / cancelled)."""
+    cancel = job["cancel"]
+
+    def was_cancelled():
+        if cancel.is_set():
+            _finish(job, "cancelled", job["stage"], "Captioning cancelled.")
+            return True
+        return False
+
+    try:
+        _set(job, status="processing", stage="preparing", progress=2,
+             message="Preparing your video…")
+        if was_cancelled():
+            return
+
+        # --- preparing: validate + extract the audio track ---------------
+        if PROVIDER == "openrouter":
+            audio_path = tmp / "audio.mp3"
+            ok, err = run([
+                "ffmpeg", "-y", "-v", "error", "-i", str(video_path),
+                "-vn", "-ac", "1", "-ar", "16000", "-codec:a", "libmp3lame", "-q:a", "4",
+                str(audio_path),
+            ])
+        else:
+            audio_path = tmp / "audio.wav"
+            ok, err = extract_audio(video_path, audio_path)
+        if not ok:
+            _finish(job, "failed", "preparing",
+                    "Captioning failed while preparing your video.",
+                    error={"stage": "preparing",
+                           "message": "ffmpeg could not extract audio from that file. Is it a valid video? " + err})
+            return
+        _set(job, progress=10)
+        if was_cancelled():
+            return
+
+        # --- transcribing --------------------------------------------------
+        _set(job, stage="transcribing", message="Listening to your audio…")
+        words, cues, duration, detected = [], None, 0.0, None
+        if PROVIDER == "openrouter":
+            _set(job, progress=None)  # no segment stream: indeterminate
+            if was_cancelled():
+                return
+            try:
+                cues, duration, detected = transcribe_with_openrouter(audio_path, language, work_dir=tmp)
+            except RuntimeError as exc:
+                _finish(job, "failed", "transcribing",
+                        "Captioning failed while transcribing your audio.",
+                        error={"stage": "transcribing", "message": str(exc)})
+                return
+            words = [w for c in cues for w in (c.get("words") or [])]
+            if was_cancelled():
+                return
+        else:
+            # The model lock keeps two jobs (or a job + nothing else) from
+            # fighting over the CPU-bound model; HTTP stays responsive
+            # because this runs on the worker thread, not a request thread.
+            with _transcribe_lock:
+                model = get_model()
+                segments, info = model.transcribe(
+                    str(audio_path),
+                    language=language,
+                    word_timestamps=True,
+                    initial_prompt=HINGLISH_PROMPT,
+                    vad_filter=False,
+                )
+                duration = float(getattr(info, "duration", 0) or 0) or probe_duration(audio_path)
+                detected = getattr(info, "language", None)
+                t0 = time.time()
+                rate = None  # smoothed audio-seconds per real second
+                for seg in segments:
+                    if cancel.is_set():
+                        _finish(job, "cancelled", "transcribing", "Captioning cancelled.")
+                        return
+                    for w in (seg.words or []):
+                        words.append({"word": w.word.strip(), "start": round(w.start, 3), "end": round(w.end, 3)})
+                    if not seg.words and seg.text.strip():
+                        ws = seg.text.strip().split()
+                        per = (seg.end - seg.start) / max(1, len(ws))
+                        words.extend({"word": t, "start": round(seg.start + i * per, 3),
+                                      "end": round(seg.start + (i + 1) * per, 3)} for i, t in enumerate(ws))
+                    # REAL progress: how much audio has actually been
+                    # transcribed, measured from the segment timestamps.
+                    if duration > 0:
+                        frac = min(1.0, seg.end / duration)
+                        elapsed_real = time.time() - t0
+                        eta = None
+                        if seg.end > 2 and elapsed_real > 1:
+                            inst = seg.end / elapsed_real
+                            rate = inst if rate is None else 0.7 * rate + 0.3 * inst
+                            if rate > 0:
+                                eta = round((duration - seg.end) / rate, 1)
+                        _set(job, progress=round(10 + 70 * frac, 1), eta=eta,
+                             message=f"Listening to your audio… ({int(frac * 100)}% of the audio done)")
+
+        # --- generating_captions ------------------------------------------
+        _set(job, stage="generating_captions", progress=80, eta=None,
+             message="Writing your Hinglish captions…")
+        if cues is None:
+            cues = words_to_cues(words)
+        if not cues:
+            _finish(job, "failed", "generating_captions",
+                    "Captioning failed while writing captions.",
+                    error={"stage": "generating_captions",
+                           "message": "No speech was found in this clip, so there is nothing to caption. Check that the video has audible speech and try again."})
+            return
+        srt = cues_to_srt(cues)
+        if was_cancelled():
+            return
+
+        # --- preparing_editor ----------------------------------------------
+        _set(job, stage="preparing_editor", progress=92,
+             message="Getting your captions ready to edit…")
+        result = {
+            "cues": cues,
+            "words": words,
+            "srt": srt,
+            "language": detected,
+            "duration": round(float(duration), 3),
+            "provider": PROVIDER,
+        }
+        _set(job, progress=99, result=result)
+        _finish(job, "completed", "completed", "Your captions are ready!")
+        _set(job, progress=100)
+    except Exception as exc:  # never leave a job hanging in "processing"
+        _finish(job, "failed", job["stage"], "Captioning failed.",
+                error={"stage": job["stage"], "message": f"Captioning failed: {exc}"})
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@app.post("/api/jobs")
+def create_job(file: UploadFile = File(...), language: str = Form("")):
+    tmp = Path(tempfile.mkdtemp(prefix="captionai-job-"))
+    suffix = Path(file.filename or "video.mp4").suffix or ".mp4"
+    video_path = tmp / f"input{suffix}"
+    try:
+        size = save_upload(file, video_path)
+    except ValueError as exc:
+        shutil.rmtree(tmp, ignore_errors=True)
+        return json_error(str(exc), status=413)
+    if size == 0:
+        shutil.rmtree(tmp, ignore_errors=True)
+        return json_error("The uploaded file was empty.")
+    job_id = uuid.uuid4().hex
+    job = {
+        "id": job_id, "status": "queued", "stage": "uploaded", "progress": 0,
+        "eta": None, "message": "Video received — captioning will start in a moment.",
+        "error": None, "result": None,
+        "created_at": time.time(), "finished_at": None,
+        "cancel": threading.Event(),
+    }
+    with _jobs_lock:
+        # Lazy housekeeping: drop expired finished jobs on new submissions.
+        expired = [jid for jid, j in _jobs.items()
+                   if j["finished_at"] and time.time() - j["finished_at"] > JOB_TTL_SECONDS]
+        for jid in expired:
+            del _jobs[jid]
+        _jobs[job_id] = job
+    threading.Thread(target=_run_job, args=(job, video_path, language.strip() or None, tmp),
+                     daemon=True).start()
+    return {"ok": True, "job_id": job_id, "status": "queued"}
+
+
+@app.get("/api/jobs/{job_id}")
+def get_job(job_id: str):
+    job = _get_job(job_id)
+    if job is None:
+        return json_error("Job not found — it may have expired (finished jobs are kept for about 30 minutes).", status=404)
+    return _job_view(job)
+
+
+@app.post("/api/jobs/{job_id}/cancel")
+def cancel_job(job_id: str):
+    job = _get_job(job_id)
+    if job is None:
+        return json_error("Job not found — it may have expired (finished jobs are kept for about 30 minutes).", status=404)
+    if job["status"] in ("queued", "processing"):
+        job["cancel"].set()
+    return _job_view(job)
 
 
 @app.post("/api/burn")

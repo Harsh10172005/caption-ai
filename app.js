@@ -21,8 +21,8 @@ function setStatus(msg, kind = "") {
   }
 }
 function guideToGenerate(flash = true) {
-  // Send the user's eyes to the "Generate captions" panel and pulse it.
-  const panel = document.getElementById("transcribePanel");
+  // Send the user's eyes to the Advanced options panel and pulse it.
+  const panel = document.getElementById("advancedPanel");
   if (!panel) return;
   panel.open = true;
   panel.scrollIntoView({ block: "center", behavior: "smooth" });
@@ -35,9 +35,43 @@ function guideToGenerate(flash = true) {
 }
 function requireCues(action) {
   if (cues.length) return true;
-  setStatus(`⚠️ No captions yet — ${action} needs captions first. Step 1: generate them in the “1 · Generate captions” panel (Auto-caption, API key, paste a script, or Import SRT). Then try again.`, "error");
+  setStatus(`⚠️ No captions yet — ${action} needs captions first. Go back and upload your video so the AI can caption it, or add captions from “Advanced options” (API key, paste a script, or Import SRT). Then try again.`, "error");
   guideToGenerate(true);
   return false;
+}
+
+/* ---------- 3-screen flow: Upload → Processing → Your captioned video ---------- */
+let currentScreen = "upload";
+const SCREEN_STEP = { upload: 1, processing: 2, result: 3 };
+function showScreen(name) {
+  currentScreen = name;
+  $("screenUpload").hidden = name !== "upload";
+  $("screenProcessing").hidden = name !== "processing";
+  $("screenResult").hidden = name !== "result";
+  document.querySelectorAll("#stepper li").forEach((li) => {
+    const n = +li.dataset.step;
+    li.classList.toggle("active", n === SCREEN_STEP[name]);
+    li.classList.toggle("done", n < SCREEN_STEP[name]);
+  });
+  if (name !== "upload") $("editor").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+function updateVideoPresence() {
+  const has = !!videoFile;
+  $("reselectBox").hidden = has;
+  $("stageWrap").style.display = has ? "" : "none";
+  if (has) $("resultFileInfo").textContent = `${videoFile.name} · ${(videoFile.size / 1048576).toFixed(1)} MB`;
+}
+function enterResult(opts = {}) {
+  showScreen("result");
+  updateVideoPresence();
+  $("manualBanner").hidden = !(opts.manual && !cues.length);
+  if (opts.manual) {
+    $("advancedPanel").open = true;
+    if (opts.focus) {
+      const f = $(opts.focus);
+      if (f) setTimeout(() => { try { f.focus(); } catch (e) {} }, 400);
+    }
+  }
 }
 function fmt(t) {
   if (!isFinite(t)) t = 0;
@@ -66,30 +100,44 @@ function download(name, blob) {
 }
 
 /* ---------- Video loading ---------- */
-function loadVideoFile(file) {
-  if (!file) return;
-  if (!/^video\//.test(file.type) && !/\.(mp4|webm|mov)$/i.test(file.name)) {
-    setStatus("That doesn't look like a video file. Please choose an MP4 or WebM clip.", "error"); return;
-  }
+function validVideoFile(file) {
+  return !!file && (/^video\//.test(file.type) || /\.(mp4|webm|mov)$/i.test(file.name));
+}
+function attachVideo(file) {
   videoFile = file;
   if (videoURL) URL.revokeObjectURL(videoURL);
   videoURL = URL.createObjectURL(file);
   video.src = videoURL;
-  const mb = (file.size / 1048576).toFixed(1);
-  $("fileInfo").textContent = `${file.name} · ${mb} MB`;
-  if (file.size > 25 * 1024 * 1024) {
-    setStatus(`✅ Video loaded: ${file.name} (${mb} MB). NEXT STEP → generate captions in the panel below: press “Auto-caption my video”. (Note: at ${mb} MB the API-key mode is over its 25 MB limit — Auto-caption via the backend accepts videos up to 300 MB.)`, "ok");
-  } else {
-    setStatus(`✅ Video loaded: ${file.name} (${mb} MB). NEXT STEP → generate captions in the panel below: press “Auto-caption my video” (backend, no key), or use an API key / paste a script. Nothing is captioned yet — exporting before this step won't work.`, "ok");
-  }
-  guideToGenerate(true);
+  updateVideoPresence();
 }
-$("videoInput").addEventListener("change", (e) => loadVideoFile(e.target.files[0]));
+function startUploadFlow(file) {
+  if (!file) return;
+  if (!validVideoFile(file)) {
+    setStatus("That doesn't look like a video file. Please choose an MP4 or WebM clip.", "error"); return;
+  }
+  if (file.size > BACKEND_MAX_MB * 1024 * 1024) {
+    setStatus(`⚠️ This video is ${(file.size / 1048576).toFixed(0)} MB — over the caption server's ${BACKEND_MAX_MB} MB limit. Please trim or compress it first (in VN Editor: export at 1080p instead of 4K), then upload again.`, "error"); return;
+  }
+  if (jobState.active) return; // a captioning job is already running
+  // A new video starts a fresh captioning session — old cues are replaced.
+  cues = []; activeCueIdx = -1; renderCues(); updateOverlay(true);
+  attachVideo(file);
+  captureThumb(file);
+  startCaptionJob(file);
+}
+$("videoInput").addEventListener("change", (e) => startUploadFlow(e.target.files[0]));
 const dz = $("dropZone");
 ["dragenter", "dragover"].forEach((ev) => dz.addEventListener(ev, (e) => { e.preventDefault(); dz.classList.add("dragover"); }));
 ["dragleave", "drop"].forEach((ev) => dz.addEventListener(ev, (e) => { e.preventDefault(); dz.classList.remove("dragover"); }));
-dz.addEventListener("drop", (e) => loadVideoFile(e.dataTransfer.files[0]));
+dz.addEventListener("drop", (e) => startUploadFlow(e.dataTransfer.files[0]));
 dz.addEventListener("keydown", (e) => { if (e.key === "Enter") $("videoInput").click(); });
+$("reselectInput").addEventListener("change", (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  if (!validVideoFile(f)) { setStatus("That doesn't look like a video file. Please choose an MP4 or WebM clip.", "error"); return; }
+  attachVideo(f);
+  setStatus(`Video re-attached: ${f.name}. Your captions are loaded — preview them here, then download your captioned MP4.`, "ok");
+});
 
 video.addEventListener("loadedmetadata", () => {
   $("timeLabel").textContent = `${fmt(video.currentTime)} / ${fmt(video.duration)}`;
@@ -99,8 +147,8 @@ video.addEventListener("loadedmetadata", () => {
   if (!isFinite(video.duration) || video.duration === 0 || video.videoWidth === 0) {
     setStatus("⚠️ This file loaded but the browser can't decode its video (duration/size unreadable). It's probably an unsupported codec such as HEVC/.mov. Please export it as MP4 (H.264) — in VN: Share → Export → MP4 — or use the backend, which handles these files with FFmpeg.", "error");
   }
-  if (cues.length && !videoFile) return;
-  if (cues.length) renderCues(); // re-time script cues if they were made before load
+  if (cues.length) renderCues(); // re-render now that real timing is known
+  updateOverlay(true);
 });
 video.addEventListener("error", () => {
   if (!videoFile) return;
@@ -135,7 +183,10 @@ function restoreState() {
   if (Array.isArray(saved.cues) && saved.cues.length) {
     cues = saved.cues.filter((c) => c && isFinite(c.start) && isFinite(c.end) && typeof c.text === "string");
     renderCues(); updateOverlay(true);
-    if (cues.length) setStatus(`Restored ${cues.length} autosaved caption cue${cues.length === 1 ? "" : "s"} from your last session. Your captions and style autosave in this browser as you work (your API key is never saved).`, "ok");
+    if (cues.length) {
+      $("resumeRow").hidden = false;
+      setStatus(`Welcome back — restored ${cues.length} autosaved caption cue${cues.length === 1 ? "" : "s"} from your last session. Resume them below, or upload a new video to start fresh. (Your API key is never saved.)`, "ok");
+    }
   }
 }
 
@@ -166,6 +217,7 @@ function splitIntoCues(words, duration) {
 function setCues(newCues, msg) {
   cues = newCues.sort((a, b) => a.start - b.start);
   activeCueIdx = -1; renderCues(); updateOverlay();
+  if (cues.length) { const b = $("manualBanner"); if (b) b.hidden = true; }
   if (msg) setStatus(msg, "ok");
 }
 function renderCues() {
@@ -232,7 +284,7 @@ $("transcribeBtn").addEventListener("click", async () => {
   const endpoint = isOR ? "https://openrouter.ai/api/v1/audio/transcriptions" : "https://api.openai.com/v1/audio/transcriptions";
   const model = isOR ? "openai/whisper-1" : "whisper-1";
   if (!key) { setStatus(`Paste your ${isOR ? "OpenRouter" : "OpenAI"} API key first — or use Auto-caption / script mode / the demo, no key needed.`, "error"); return; }
-  if (!videoFile) { setStatus("Choose a video file first, then transcribe.", "error"); return; }
+  if (!videoFile) { setStatus("Re-select / choose a video file first (box at the top of this screen), then transcribe.", "error"); return; }
   if (videoFile.size > 25 * 1024 * 1024) { setStatus("This file is over 25 MB, so the transcription API will reject it. Trim or compress the video, or paste a script instead.", "error"); return; }
   setStatus(`Sending video to ${isOR ? "OpenRouter" : "OpenAI"} Whisper… this can take a moment for longer clips.${isOR ? " Note: OpenRouter ignores the Hinglish prompt, so Hindi may come back in Devanagari script." : ""}`);
   try {
@@ -267,15 +319,28 @@ $("transcribeBtn").addEventListener("click", async () => {
     }
     if (!newCues.length) throw new Error("Whisper responded, but no speech was found in this clip.");
     setCues(newCues, `Done — created ${newCues.length} caption cues from Whisper. Click any cue to check and fix words.`);
+    enterResult();
   } catch (err) {
     setStatus("Transcription failed: " + err.message + " Check your key, connection, and file size, then try again — or use script mode.", "error");
   }
 });
 
 /* ---------- Transcription + MP4 export: Caption AI backend (no key) ---------- */
+// The user never types a backend address: an explicit override (Advanced
+// options / previously saved) wins; on a static host (GitHub Pages) the
+// app falls back to the deployed backend; otherwise the backend is
+// whatever served this page (same origin).
+const DEPLOYED_BACKEND = "https://caption-ai-ukit.onrender.com";
 function backendBase() {
-  // Empty field = same origin (page served by the backend itself).
-  return ($("backendUrl").value || "").trim().replace(/\/+$/, "");
+  const field = $("backendUrl");
+  const fromField = field ? field.value.trim().replace(/\/+$/, "") : "";
+  if (fromField) return fromField;
+  try {
+    const saved = localStorage.getItem("captionAiBackendUrl");
+    if (saved) return saved.trim().replace(/\/+$/, "");
+  } catch (e) { /* storage blocked */ }
+  if (/(^|\.)github\.io$/i.test(location.hostname || "")) return DEPLOYED_BACKEND;
+  return "";
 }
 try {
   const savedBackend = localStorage.getItem("captionAiBackendUrl");
@@ -291,35 +356,392 @@ async function parseBackendError(res) {
 }
 
 const BACKEND_MAX_MB = 300;
-$("autoCaptionBtn").addEventListener("click", async () => {
-  if (!videoFile) { setStatus("Choose a video file first, then auto-caption it.", "error"); return; }
-  if (videoFile.size > BACKEND_MAX_MB * 1024 * 1024) { setStatus(`⚠️ This video is ${(videoFile.size / 1048576).toFixed(0)} MB — over the backend's ${BACKEND_MAX_MB} MB limit. Please trim or compress it first (in VN Editor: export at 1080p instead of 4K).`, "error"); return; }
-  const base = backendBase();
-  const btn = $("autoCaptionBtn"); btn.disabled = true;
-  setStatus(`Uploading ${videoFile.name} to the Caption AI backend for transcription… longer clips take a while, and the first run loads the Whisper model. Keep this tab open.`);
+/* ---------- Automatic captioning: backend jobs with REAL progress ----------
+   The processing screen is a live console for a server-side job:
+   POST /api/jobs (XHR, so upload progress is real bytes %) creates the job;
+   the frontend then polls GET /api/jobs/{id} every ~1.5s. The server
+   measures progress from the audio itself (transcribed segment end /
+   total duration, inside stage bands) — nothing here invents numbers:
+   when the server reports progress_percentage=null the UI switches to
+   an indeterminate display. Poll failures back off and never fail the
+   job; the job_id is kept in sessionStorage so a refresh reattaches. */
+const JOB_STAGES = ["uploaded", "preparing", "transcribing", "generating_captions", "preparing_editor", "completed"];
+const jobState = {
+  active: false, id: null, backend: undefined, timer: null, ticker: null,
+  startedAt: 0, pollDelay: 1500, fails: 0, finishing: false, cancelling: false, reattached: false,
+};
+
+function jobBackend() { return jobState.backend !== undefined ? jobState.backend : backendBase(); }
+function clearJobSession() {
   try {
+    sessionStorage.removeItem("captionAiJobId");
+    sessionStorage.removeItem("captionAiJobBackend");
+    sessionStorage.removeItem("captionAiJobName");
+  } catch (e) {}
+}
+function setJobActionsEnabled(on) {
+  ["transcribeBtn", "scriptBtn", "demoBtn"].forEach((id) => { const b = $(id); if (b) b.disabled = !on; });
+}
+
+/* --- thumbnail: grab a frame locally from the picked file (display only) --- */
+function captureThumb(file) {
+  const img = $("procThumb");
+  img.hidden = true; img.removeAttribute("src");
+  try {
+    const url = URL.createObjectURL(file);
+    const v = document.createElement("video");
+    v.muted = true; v.playsInline = true; v.preload = "auto"; v.src = url;
+    let done = false;
+    const finish = (dataUrl) => {
+      if (done) return; done = true;
+      URL.revokeObjectURL(url);
+      if (dataUrl) {
+        img.src = dataUrl; img.hidden = false;
+        try { sessionStorage.setItem("captionAiThumb", dataUrl); } catch (e) {}
+      }
+    };
+    const draw = () => {
+      try {
+        const c = document.createElement("canvas");
+        const w = 180, h = Math.max(60, Math.round(w * (v.videoHeight || 320) / (v.videoWidth || 180)));
+        c.width = w; c.height = h;
+        c.getContext("2d").drawImage(v, 0, 0, w, h);
+        finish(c.toDataURL("image/jpeg", 0.72));
+      } catch (e) { finish(null); }
+    };
+    v.addEventListener("loadeddata", () => {
+      if (v.duration && isFinite(v.duration)) {
+        v.addEventListener("seeked", draw, { once: true });
+        try { v.currentTime = Math.min(0.6, v.duration / 2); } catch (e) { draw(); }
+        setTimeout(draw, 900); // if 'seeked' never fires, draw the first frame
+      } else draw();
+    });
+    v.addEventListener("error", () => finish(null));
+    setTimeout(() => finish(null), 3000);
+  } catch (e) { /* thumbnail is decorative — never block captioning on it */ }
+}
+
+/* --- processing console rendering --- */
+const RING_C = 326.7; // 2πr for r=52
+function setProcProgress(pct, indeterminate) {
+  const ring = document.querySelector(".proc-ring-wrap");
+  const bar = document.querySelector(".proc-bar");
+  if (indeterminate) {
+    ring.classList.add("indeterminate"); bar.classList.add("indeterminate");
+    $("procPct").textContent = "···";
+    return;
+  }
+  ring.classList.remove("indeterminate"); bar.classList.remove("indeterminate");
+  const p = Math.max(0, Math.min(100, pct || 0));
+  $("procPct").textContent = Math.round(p) + "%";
+  $("procBarFill").style.width = p + "%";
+  $("procRingFg").style.strokeDashoffset = String(RING_C * (1 - p / 100));
+}
+function setStageStates(currentStage, failedStage) {
+  const cur = JOB_STAGES.indexOf(currentStage);
+  document.querySelectorAll("#stageList li").forEach((li) => {
+    const idx = JOB_STAGES.indexOf(li.dataset.stage);
+    li.classList.toggle("done", currentStage === "completed" || idx < cur);
+    li.classList.toggle("current", !failedStage && currentStage !== "completed" && idx === cur);
+    li.classList.toggle("failed", li.dataset.stage === failedStage);
+  });
+}
+function startTicker() {
+  stopTicker();
+  jobState.ticker = setInterval(() => {
+    const el = (Date.now() - jobState.startedAt) / 1000;
+    $("procElapsed").textContent = fmt(el);
+    if (el > 180 && jobState.active) $("procLongNote").hidden = false;
+  }, 250);
+}
+function stopTicker() { if (jobState.ticker) { clearInterval(jobState.ticker); jobState.ticker = null; } }
+function resetProcessingUI(fileLabel) {
+  $("procError").hidden = true; $("procError").classList.remove("cancelled");
+  $("procSuccess").hidden = true;
+  $("procLongNote").hidden = true; $("procConnNote").hidden = true;
+  $("procEta").hidden = true;
+  const cb = $("procCancelBtn");
+  cb.hidden = false; cb.disabled = false; cb.textContent = "Cancel captioning";
+  $("procMessage").textContent = "";
+  $("procPhase").textContent = "Uploading your video…";
+  if (fileLabel) $("fileInfo").textContent = fileLabel;
+  setStageStates("uploaded");
+  setProcProgress(0, false);
+  $("procElapsed").textContent = "0:00";
+}
+
+/* --- job lifecycle --- */
+function submitJob(file) {
+  // XMLHttpRequest (not fetch) so upload progress events give the REAL
+  // bytes-sent percentage for the "uploaded" stage.
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", jobBackend() + "/api/jobs");
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) setProcProgress((e.loaded / e.total) * 100, false);
+    };
+    xhr.onload = () => {
+      let data = null;
+      try { data = JSON.parse(xhr.responseText); } catch (e) {}
+      if (xhr.status >= 200 && xhr.status < 300 && data && data.job_id) { resolve(data.job_id); return; }
+      if (xhr.status === 404 || xhr.status === 405) {
+        reject(new Error("The caption server was reached, but it doesn't offer live captioning jobs. Use the manual modes in Advanced options instead (API key or paste a script)."));
+        return;
+      }
+      reject(new Error((data && data.error) || `The caption server returned ${xhr.status}.`));
+    };
+    xhr.onerror = () => reject(new Error("Could not reach the caption server. Check your connection — or use the manual modes in Advanced options (API key or paste a script)."));
     const form = new FormData();
-    form.append("file", videoFile, videoFile.name);
-    const lang = $("languageSelect").value;
-    if (lang) form.append("language", lang);
-    const res = await fetch(base + "/api/transcribe", { method: "POST", body: form });
-    if (!res.ok) throw new Error(await parseBackendError(res));
-    const data = await res.json();
-    if (!data.cues || !data.cues.length) throw new Error("The backend found no speech in this clip.");
-    setCues(data.cues.map((c) => ({
-      start: c.start, end: c.end, text: c.text,
-      words: (c.words && c.words.length) ? c.words : (() => {
-        const ws = c.text.trim().split(/\s+/).filter(Boolean); const per = ws.length ? (c.end - c.start) / ws.length : 0;
-        return ws.map((w, j) => ({ word: w, start: c.start + j * per, end: c.start + (j + 1) * per }));
-      })(),
-    })), `Auto-caption done — the backend created ${data.cues.length} cues${data.language ? ` (detected language: ${data.language})` : ""}. Check the words, fix any mistakes, style them, then export.`);
+    form.append("file", file, file.name);
+    // No language field: automatic captioning always uses the server-side
+    // Hinglish auto default.
+    xhr.send(form);
+  });
+}
+
+async function startCaptionJob(file) {
+  jobState.active = true; jobState.finishing = false; jobState.cancelling = false; jobState.reattached = false;
+  jobState.startedAt = Date.now(); jobState.fails = 0; jobState.pollDelay = 1500;
+  jobState.backend = backendBase();
+  setJobActionsEnabled(false);
+  showScreen("processing");
+  resetProcessingUI(`${file.name} · ${(file.size / 1048576).toFixed(1)} MB`);
+  setStatus(`Captioning “${file.name}” — the AI is on it. You'll land on your captioned video automatically when it's done.`);
+  startTicker();
+  let jobId;
+  try {
+    jobId = await submitJob(file);
   } catch (err) {
-    setStatus("Auto-caption failed: " + (err && err.message ? err.message : err) + " — the backend may be unreachable. Check the Backend URL, or fall back to the Whisper key / script modes below; they still work.", "error");
-  } finally { btn.disabled = false; }
+    showJobFailure("uploaded", (err && err.message) || "Could not reach the caption server.");
+    return;
+  }
+  jobState.id = jobId;
+  try {
+    sessionStorage.setItem("captionAiJobId", jobId);
+    sessionStorage.setItem("captionAiJobBackend", jobState.backend);
+    sessionStorage.setItem("captionAiJobName", file.name);
+  } catch (e) {}
+  setStageStates("preparing");
+  $("procPhase").textContent = "Captioning your video…";
+  pollJob();
+}
+
+function schedulePoll(ms) {
+  clearTimeout(jobState.timer);
+  jobState.timer = setTimeout(pollJob, ms);
+}
+async function pollJob() {
+  if (!jobState.id) return;
+  let job;
+  try {
+    const res = await fetch(jobBackend() + "/api/jobs/" + jobState.id);
+    if (res.status === 404) { onJobGone(); return; }
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    job = await res.json();
+    jobState.fails = 0; jobState.pollDelay = 1500;
+    $("procConnNote").hidden = true;
+  } catch (err) {
+    // Connection loss is NOT job failure: back off and keep polling; if
+    // the job finished meanwhile, the next successful poll picks it up.
+    jobState.fails++;
+    $("procConnNote").hidden = false;
+    jobState.pollDelay = Math.min(10000, Math.max(1500, jobState.pollDelay * 2));
+    schedulePoll(jobState.pollDelay);
+    return;
+  }
+  renderJob(job);
+  if (job.status === "completed") { onJobCompleted(job); return; }
+  if (job.status === "failed") { onJobFailed(job); return; }
+  if (job.status === "cancelled") { onJobCancelled(); return; }
+  schedulePoll(1500);
+}
+function renderJob(job) {
+  if (job.stage) setStageStates(job.stage, null);
+  if (job.progress_percentage === null || job.progress_percentage === undefined) setProcProgress(0, true);
+  else setProcProgress(job.progress_percentage, false);
+  if (job.message) $("procMessage").textContent = job.message;
+  $("procPhase").textContent = job.status === "queued" ? "Waiting to start…" : "Captioning your video…";
+  if (typeof job.estimated_remaining_seconds === "number") {
+    $("procEta").hidden = false;
+    $("procEtaVal").textContent = fmt(job.estimated_remaining_seconds);
+  } else {
+    $("procEta").hidden = true;
+  }
+  // After a refresh-reattach, align the elapsed clock with the server's.
+  if (jobState.reattached && typeof job.elapsed_seconds === "number") {
+    jobState.startedAt = Date.now() - job.elapsed_seconds * 1000;
+    jobState.reattached = false;
+  }
+}
+function mapResultCues(result) {
+  return (result.cues || []).map((c) => ({
+    start: c.start, end: c.end, text: c.text,
+    words: (c.words && c.words.length) ? c.words : (() => {
+      const ws = (c.text || "").trim().split(/\s+/).filter(Boolean);
+      const per = ws.length ? (c.end - c.start) / ws.length : 0;
+      return ws.map((w, j) => ({ word: w, start: c.start + j * per, end: c.start + (j + 1) * per }));
+    })(),
+  }));
+}
+function onJobCompleted(job) {
+  if (jobState.finishing) return;
+  jobState.finishing = true;
+  stopTicker();
+  if (typeof job.elapsed_seconds === "number") $("procElapsed").textContent = fmt(job.elapsed_seconds);
+  setStageStates("completed", null);
+  setProcProgress(100, false);
+  $("procMessage").textContent = "";
+  $("procPhase").textContent = "Done!";
+  $("procCancelBtn").hidden = true;
+  $("procSuccess").hidden = false;
+  const result = job.result || {};
+  setTimeout(() => finishToEditor(result), 1200);
+}
+function finishToEditor(result) {
+  const mapped = mapResultCues(result || {});
+  jobState.active = false; jobState.id = null;
+  clearJobSession();
+  setJobActionsEnabled(true);
+  if (mapped.length) {
+    setCues(mapped, `Auto-caption done — created ${mapped.length} cues${result.language ? ` (detected language: ${result.language})` : ""}. Check the words, fix any mistakes, style them, then download your captioned MP4.`);
+  } else {
+    setStatus("Captioning finished, but no captions came back. Try again, or add captions from Advanced options.", "error");
+  }
+  enterResult();
+}
+function showJobFailure(stage, message) {
+  stopTicker();
+  clearTimeout(jobState.timer);
+  jobState.active = false;
+  setJobActionsEnabled(true);
+  setStageStates(stage || "transcribing", stage || "transcribing");
+  $("procPhase").textContent = "Captioning didn't finish";
+  $("procCancelBtn").hidden = true;
+  const box = $("procError");
+  box.hidden = false; box.classList.remove("cancelled");
+  $("procKeyBtn").hidden = false; $("procScriptBtn").hidden = false;
+  $("procErrorMsg").textContent = "⚠️ " + message;
+  // Retry re-submits the SAME File object — only possible while it's
+  // still held in this page (not after a refresh).
+  $("procRetryBtn").hidden = !videoFile;
+  setStatus("Auto-caption didn't finish: " + message, "error");
+}
+function onJobFailed(job) {
+  const err = job.error || {};
+  showJobFailure(err.stage || job.stage || "transcribing",
+    err.message || job.message || "Captioning failed for an unknown reason.");
+}
+function onJobCancelled() {
+  stopTicker();
+  clearTimeout(jobState.timer);
+  jobState.active = false;
+  setJobActionsEnabled(true);
+  $("procPhase").textContent = "Captioning cancelled";
+  $("procCancelBtn").hidden = true;
+  const box = $("procError");
+  box.hidden = false; box.classList.add("cancelled");
+  $("procErrorMsg").textContent = "Captioning was cancelled. Your video wasn't changed — try again whenever you're ready.";
+  $("procRetryBtn").hidden = !videoFile;
+  $("procKeyBtn").hidden = true; $("procScriptBtn").hidden = true;
+  setStatus("Captioning cancelled — nothing was changed.");
+}
+function onJobGone() {
+  stopTicker();
+  clearTimeout(jobState.timer);
+  jobState.active = false; jobState.id = null;
+  setJobActionsEnabled(true);
+  clearJobSession();
+  setStatus("That captioning job is gone — finished jobs are kept for about 30 minutes. Please upload your video again.", "error");
+  if (cues.length) enterResult(); else showScreen("upload");
+}
+
+/* --- processing screen actions --- */
+$("procCancelBtn").addEventListener("click", async () => {
+  if (!jobState.id || jobState.cancelling) return;
+  jobState.cancelling = true;
+  const btn = $("procCancelBtn");
+  btn.disabled = true; btn.textContent = "Cancelling…";
+  try { await fetch(jobBackend() + "/api/jobs/" + jobState.id + "/cancel", { method: "POST" }); } catch (e) {}
+  clearTimeout(jobState.timer);
+  pollJob(); // the poll loop observes the cancelled status and shows it
 });
+$("procRetryBtn").addEventListener("click", () => {
+  if (!videoFile || jobState.active) return;
+  clearJobSession();
+  startCaptionJob(videoFile); // same File object — the user does NOT re-pick
+});
+function leaveJobForManual(focus) {
+  // Deliberately leaving the job flow: stop ALL timers/polls so a late
+  // poll can never yank the user out of manual mode, and drop the stored
+  // job so a refresh doesn't reattach to it either.
+  stopTicker();
+  clearTimeout(jobState.timer);
+  jobState.active = false; jobState.id = null;
+  clearJobSession();
+  setJobActionsEnabled(true);
+  enterResult({ manual: true, focus });
+}
+$("procKeyBtn").addEventListener("click", () => leaveJobForManual("apiKey"));
+$("procScriptBtn").addEventListener("click", () => leaveJobForManual("scriptInput"));
+$("procStartOverBtn").addEventListener("click", resetAll);
+$("newVideoBtn").addEventListener("click", resetAll);
+$("resumeBtn").addEventListener("click", () => {
+  enterResult();
+  setStatus("Your saved captions are loaded. Re-select the same video file (box at the top) to preview them and export the captioned MP4.", "ok");
+});
+$("uploadAdvBtn").addEventListener("click", () => enterResult({ manual: true }));
+
+function resetAll() {
+  stopTicker();
+  clearTimeout(jobState.timer);
+  jobState.active = false; jobState.id = null; jobState.finishing = false;
+  clearJobSession();
+  try { sessionStorage.removeItem("captionAiThumb"); } catch (e) {}
+  setJobActionsEnabled(true);
+  videoFile = null;
+  if (videoURL) { URL.revokeObjectURL(videoURL); videoURL = null; }
+  video.removeAttribute("src");
+  try { video.load(); } catch (e) {}
+  cues = []; activeCueIdx = -1; renderCues(); updateOverlay(true);
+  $("videoInput").value = "";
+  const ri = $("reselectInput"); if (ri) ri.value = "";
+  $("manualBanner").hidden = true;
+  $("resumeRow").hidden = true;
+  setStatus("Ready — upload a video and we'll add AI captions to it. You'll only get it back with captions on it.");
+  showScreen("upload");
+}
+
+/* --- refresh reattach: resume polling the job stored in sessionStorage --- */
+function tryReattach() {
+  let id = null, name = "", thumb = null;
+  try {
+    id = sessionStorage.getItem("captionAiJobId");
+    jobState.backend = sessionStorage.getItem("captionAiJobBackend");
+    name = sessionStorage.getItem("captionAiJobName") || "";
+    thumb = sessionStorage.getItem("captionAiThumb");
+  } catch (e) {}
+  if (!id) { jobState.backend = undefined; return; }
+  jobState.id = id;
+  jobState.active = true; jobState.reattached = true;
+  jobState.startedAt = Date.now(); jobState.fails = 0; jobState.pollDelay = 1500;
+  setJobActionsEnabled(false);
+  showScreen("processing");
+  resetProcessingUI(name ? `${name} · reconnected after refresh` : "Your video · reconnected after refresh");
+  if (thumb) { const img = $("procThumb"); img.src = thumb; img.hidden = false; }
+  $("procPhase").textContent = "Reconnecting to your captioning job…";
+  startTicker();
+  pollJob();
+}
 
 $("exportMp4BackendBtn").addEventListener("click", async () => {
-  if (!videoFile) { setStatus("Load a video first — backend MP4 export needs the original clip.", "error"); return; }
+  if (!videoFile) {
+    setStatus("Re-select your video file first (the box at the top of this screen) — the captioned MP4 is made from your original clip, and browsers can't restore the file automatically.", "error");
+    const rb = $("reselectBox");
+    rb.scrollIntoView({ block: "center", behavior: "smooth" });
+    rb.classList.remove("attention"); void rb.offsetWidth; rb.classList.add("attention");
+    setTimeout(() => rb.classList.remove("attention"), 3600);
+    return;
+  }
   if (videoFile.size > BACKEND_MAX_MB * 1024 * 1024) { setStatus(`⚠️ This video is ${(videoFile.size / 1048576).toFixed(0)} MB — over the backend's ${BACKEND_MAX_MB} MB limit. Please trim or compress it first.`, "error"); return; }
   if (!requireCues("Backend MP4 export")) return;
   const base = backendBase();
@@ -337,7 +759,7 @@ $("exportMp4BackendBtn").addEventListener("click", async () => {
     download("captioned-video.mp4", await res.blob());
     setStatus("Done — downloaded captioned-video.mp4 with burned-in captions, made by the backend.", "ok");
   } catch (err) {
-    setStatus("Backend MP4 export failed: " + (err && err.message ? err.message : err) + " — check the Backend URL / that the backend is running, or use the browser WebM export instead.", "error");
+    setStatus("Backend MP4 export failed: " + (err && err.message ? err.message : err) + " — the caption server may be unreachable (check the override in Advanced options), or use the browser WebM export instead.", "error");
   } finally { btn.disabled = false; }
 });
 
@@ -347,6 +769,7 @@ function captionsFromText(text, label) {
   if (!words.length) { setStatus("Paste some text first.", "error"); return; }
   const duration = (video.duration && isFinite(video.duration)) ? video.duration : Math.max(10, words.length / 2.5);
   setCues(splitIntoCues(words, duration), `${label}: created ${Math.ceil(words.length / 6)} cues timed across ${fmt(duration)}. ${video.duration ? "" : "Tip: load a video first for exact timing."}`);
+  enterResult();
 }
 $("scriptBtn").addEventListener("click", () => captionsFromText($("scriptInput").value, "Script mode"));
 function loadDemo() {
@@ -354,11 +777,11 @@ function loadDemo() {
   if (!video.duration || !isFinite(video.duration)) {
     // No video: build cues against demo duration so overlay/editor still work via playhead simulation is not needed;
     // cues use DEMO_DURATION and will sync once any video of similar length is loaded.
-    setCues(splitIntoCues(DEMO_TEXT.split(/\s+/), DEMO_DURATION), "Demo loaded — Hinglish captions are ready in the editor. Drop any talking-head video to preview them on a real clip, edit the words, and try the styles.");
+    setCues(splitIntoCues(DEMO_TEXT.split(/\s+/), DEMO_DURATION), "Demo loaded — Hinglish captions are ready in the editor. Upload a talking-head video any time to caption the real thing, edit the words, and try the styles.");
+    enterResult();
   } else {
     captionsFromText(DEMO_TEXT, "Demo loaded");
   }
-  document.getElementById("editor").scrollIntoView({ behavior: "smooth" });
 }
 $("demoBtn").addEventListener("click", loadDemo);
 $("heroDemoBtn").addEventListener("click", loadDemo);
@@ -425,6 +848,7 @@ $("srtInput").addEventListener("change", async (e) => {
     const imported = parseSRT(await file.text());
     if (!imported.length) { setStatus(`Couldn't find any valid caption cues in ${file.name}. Check that it's a standard .srt file.`, "error"); return; }
     setCues(imported, `Imported ${imported.length} caption cues from ${file.name}. Edit, restyle, preview, or burn them into your video.`);
+    enterResult();
   } catch (err) {
     setStatus("SRT import failed: " + err.message, "error");
   }
@@ -597,3 +1021,7 @@ $("exportVideoBtn").addEventListener("click", async () => {
     btn.disabled = false; progress.hidden = true; progressText.hidden = true; cancelBtn.hidden = true; cancelBtn.onclick = null;
   }
 });
+
+/* ---------- Startup: land on Upload — or reattach to a running job ---------- */
+showScreen("upload");
+tryReattach();

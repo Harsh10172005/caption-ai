@@ -53,9 +53,9 @@
   <section id="how" class="steps">
     <h2>From raw clip to captioned reel in three steps</h2>
     <div class="step-grid">
-      <article><span class="step-num">1</span><h3>Upload video</h3><p>Pick an MP4 or WebM talking-head clip. It stays in your browser — nothing is uploaded unless you choose AI transcription.</p></article>
-      <article><span class="step-num">2</span><h3>AI reads your Hinglish</h3><p>Use your own Whisper key for automatic transcription in Roman script, or paste a script and let the editor time it for you.</p></article>
-      <article><span class="step-num">3</span><h3>Edit &amp; export</h3><p>Fix words, pick a caption style, preview the word-by-word highlight, then download SRT files or a video with captions burned in.</p></article>
+      <article><span class="step-num">1</span><h3>Upload video</h3><p>Pick an MP4 or WebM talking-head clip. Captioning starts automatically, right away — no settings to fill in.</p></article>
+      <article><span class="step-num">2</span><h3>AI reads your Hinglish</h3><p>Our server listens to your audio and writes Roman Hinglish captions word by word — and you watch the real progress while it works.</p></article>
+      <article><span class="step-num">3</span><h3>Edit &amp; export</h3><p>Fix words, pick a caption style, preview the word-by-word highlight, then download your captioned MP4, ready to post.</p></article>
     </div>
   </section>
 
@@ -63,135 +63,220 @@
   <section id="editor" class="editor-section">
     <div class="editor-head">
       <h2>Caption editor</h2>
-      <p id="status" class="status" role="status" aria-live="polite">Ready. Load the demo, drop a video, or paste a transcript to begin.</p>
-      <p class="hint">Your captions and caption style <strong>autosave in this browser</strong> as you work and are restored when you come back. Your OpenAI API key is never saved.</p>
+      <ol id="stepper" class="stepper" aria-label="Progress">
+        <li data-step="1" class="active"><span class="step-dot">1</span> Upload</li>
+        <li data-step="2"><span class="step-dot">2</span> Processing</li>
+        <li data-step="3"><span class="step-dot">3</span> Your captioned video</li>
+      </ol>
+      <p id="status" class="status" role="status" aria-live="polite">Ready — upload a video and we'll add AI captions to it. You'll only get it back with captions on it.</p>
+      <p class="hint">Your captions and caption style <strong>autosave in this browser</strong> as you work and are restored when you come back. Any API key you use is never saved.</p>
     </div>
 
-    <div class="editor-layout">
-      <!-- Left: player -->
-      <div class="panel player-panel">
-        <div id="dropZone" class="drop-zone" tabindex="0">
-          <p><strong>Drag &amp; drop video here</strong><br>or</p>
+    <!-- SCREEN 1 · UPLOAD -->
+    <div id="screenUpload" class="screen">
+      <div class="panel upload-panel">
+        <div id="dropZone" class="drop-zone big" tabindex="0">
+          <div class="dz-icon" aria-hidden="true">⬆️</div>
+          <p><strong>Drag &amp; drop your video here</strong><br>or</p>
           <label class="btn btn-primary file-label">Choose video file
             <input id="videoInput" type="file" accept="video/mp4,video/webm,video/*" hidden>
           </label>
-          <p class="hint">MP4 / WebM works best. For Whisper, keep it under 25 MB.</p>
-          <p id="fileInfo" class="file-info"></p>
+          <p class="hint">MP4 or WebM, up to 300 MB. Captioning starts automatically — no settings, no keys, nothing to configure.</p>
         </div>
-
-        <div class="stage">
-          <video id="video" controls playsinline></video>
-          <div id="captionOverlay" class="caption-overlay pos-bottom"><span id="captionText">Your captions will appear here</span></div>
-        </div>
-        <div class="player-actions">
-          <button id="playPauseBtn" class="btn btn-ghost" type="button">Play / Pause</button>
-          <span id="timeLabel" class="time-label">0:00 / 0:00</span>
-        </div>
-
-        <fieldset class="export-box">
-          <legend>Export</legend>
-          <button id="exportSrtBtn" class="btn" type="button">Download SRT</button>
-          <button id="exportWordSrtBtn" class="btn" type="button">Download word-level SRT</button>
-          <button id="exportVideoBtn" class="btn btn-primary" type="button">Export video with captions (.webm)</button>
-          <button id="exportMp4BackendBtn" class="btn" type="button">Export MP4 (backend)</button>
-          <p class="hint">MP4 export sends your video + captions to the Caption AI backend (below), which burns them in with FFmpeg and returns a real MP4. Needs the backend running.</p>
-          <p class="hint">Video export renders in real time in Chrome — keep this tab open while it plays through. Long videos take as long as they play.</p>
-          <progress id="exportProgress" value="0" max="100" hidden></progress>
-          <p class="hint" id="exportProgressText" hidden></p>
-          <button id="exportCancelBtn" class="btn btn-ghost" type="button" hidden>Cancel export</button>
-        </fieldset>
+        <p class="promise">✅ <strong>You'll only get your video back with captions on it.</strong> Upload it, the AI listens and writes Hinglish captions, and only then do you get your video — captioned. Your raw video is never handed back as a “result”.</p>
+        <p id="resumeRow" class="resume-row" hidden>
+          <span>Welcome back — you have captions saved from last time.</span>
+          <button id="resumeBtn" class="btn btn-small" type="button">Resume your last captioned video →</button>
+        </p>
+        <p class="upload-foot"><button id="uploadAdvBtn" class="link-btn" type="button">Advanced options (API key / paste a script / backend settings) →</button></p>
       </div>
+    </div>
 
-      <!-- Right: controls -->
-      <div class="panel controls-panel">
-        <details open id="transcribePanel">
-          <summary>1 · Generate captions (do this first)</summary>
-          <div class="field">
-            <label for="backendUrl">Caption AI backend URL <span class="hint">(leave empty if this page was served by the backend itself)</span></label>
-            <input id="backendUrl" type="text" autocomplete="off" placeholder="e.g. http://localhost:8000 — empty = same origin">
+    <!-- SCREEN 2 · PROCESSING -->
+    <div id="screenProcessing" class="screen" hidden>
+      <div class="panel processing-panel">
+        <div class="proc-top">
+          <img id="procThumb" class="proc-thumb" alt="" hidden>
+          <div class="proc-file">
+            <p id="fileInfo" class="file-info"></p>
+            <p id="procPhase" class="proc-phase">Uploading your video…</p>
+            <p class="proc-times">Elapsed <span id="procElapsed">0:00</span><span id="procEta" hidden> · about <span id="procEtaVal"></span> left</span></p>
           </div>
-          <button id="autoCaptionBtn" class="btn btn-primary wide" type="button">Auto-caption my video (no key needed)</button>
-          <p class="hint">Uploads your video to the backend, which transcribes it with Whisper on the server and fills the editor automatically. First run can be slow while the model loads.</p>
-          <hr>
-          <div class="field">
-            <label for="apiProvider">Direct transcription provider <span class="hint">(only for the key-based mode below — the Auto-caption button above needs neither)</span></label>
-            <select id="apiProvider">
-              <option value="openai" selected>OpenAI (api.openai.com)</option>
-              <option value="openrouter">OpenRouter (openrouter.ai)</option>
-            </select>
+          <div class="proc-ring-wrap" aria-hidden="true">
+            <svg class="proc-ring" viewBox="0 0 120 120" width="104" height="104">
+              <circle class="ring-bg" cx="60" cy="60" r="52"></circle>
+              <circle id="procRingFg" class="ring-fg" cx="60" cy="60" r="52"></circle>
+            </svg>
+            <div id="procPct" class="proc-pct">0%</div>
           </div>
-          <div class="field">
-            <label for="apiKey">API key for the provider above <span class="hint">(kept only in memory — never saved; OpenRouter keys start with sk-or-)</span></label>
-            <input id="apiKey" type="password" autocomplete="off" placeholder="sk-...">
+        </div>
+        <div class="proc-bar"><div id="procBarFill"></div></div>
+        <ol id="stageList" class="stage-list">
+          <li data-stage="uploaded"><span class="stage-ico"></span><span class="stage-name">Uploaded</span></li>
+          <li data-stage="preparing"><span class="stage-ico"></span><span class="stage-name">Preparing your video</span></li>
+          <li data-stage="transcribing"><span class="stage-ico"></span><span class="stage-name">Listening to your audio</span></li>
+          <li data-stage="generating_captions"><span class="stage-ico"></span><span class="stage-name">Writing Hinglish captions</span></li>
+          <li data-stage="preparing_editor"><span class="stage-ico"></span><span class="stage-name">Getting captions ready</span></li>
+          <li data-stage="completed"><span class="stage-ico"></span><span class="stage-name">Done</span></li>
+        </ol>
+        <p id="procMessage" class="proc-message"></p>
+        <p id="procLongNote" class="hint" hidden>This video is taking longer than expected. Processing is still active — larger videos and free servers are slow, so hang tight.</p>
+        <p id="procConnNote" class="hint warn" hidden>Connection to the caption server flickered — retrying… your captioning keeps going on the server.</p>
+        <div class="proc-actions-row">
+          <button id="procCancelBtn" class="btn btn-ghost" type="button">Cancel captioning</button>
+        </div>
+        <div id="procSuccess" class="proc-success" hidden>
+          <div class="success-check" aria-hidden="true">✓</div>
+          <p><strong>Your captions are ready!</strong></p>
+        </div>
+        <div id="procError" class="proc-error" hidden>
+          <p id="procErrorMsg" class="proc-error-msg"></p>
+          <div class="proc-fallbacks">
+            <button id="procRetryBtn" class="btn btn-primary" type="button">Try again</button>
+            <button id="procKeyBtn" class="btn" type="button">Use my API key instead</button>
+            <button id="procScriptBtn" class="btn" type="button">Paste a script instead</button>
+            <button id="procStartOverBtn" class="btn btn-ghost" type="button">Start over</button>
           </div>
-          <div class="field">
-            <label for="languageSelect">Language hint</label>
-            <select id="languageSelect">
-              <option value="">Auto / Hinglish mix</option>
-              <option value="hi">Hindi</option><option value="en">English</option>
-              <option value="ta">Tamil</option><option value="te">Telugu</option>
-              <option value="bn">Bengali</option><option value="mr">Marathi</option>
-              <option value="gu">Gujarati</option><option value="kn">Kannada</option>
-              <option value="ml">Malayalam</option><option value="pa">Punjabi</option>
-              <option value="ur">Urdu</option>
-            </select>
-          </div>
-          <button id="transcribeBtn" class="btn btn-primary wide" type="button">Transcribe with API key</button>
-          <hr>
-          <div class="field">
-            <label for="scriptInput">No key? Paste your script / transcript</label>
-            <textarea id="scriptInput" rows="5" placeholder="Yaar suno, aaj main aapko ek aisi trick batane wala hoon jo literally game changer hai..."></textarea>
-          </div>
-          <button id="scriptBtn" class="btn wide" type="button">Create captions from script</button>
-          <button id="demoBtn" class="btn btn-ghost wide" type="button">Load Hinglish demo transcript</button>
-        </details>
+        </div>
+      </div>
+    </div>
 
-        <details open>
-          <summary>2 · Style captions</summary>
-          <div class="field">
-            <label>Theme preset</label>
-            <div class="preset-row">
-              <button class="btn preset" data-preset="clean" type="button">Clean</button>
-              <button class="btn preset" data-preset="bold-yellow" type="button">Bold Yellow</button>
-              <button class="btn preset" data-preset="high-energy" type="button">High Energy</button>
-              <button class="btn preset" data-preset="minimal" type="button">Minimal</button>
+    <!-- SCREEN 3 · RESULT -->
+    <div id="screenResult" class="screen" hidden>
+      <div class="result-bar">
+        <h3>Your captioned video</h3>
+        <button id="newVideoBtn" class="btn btn-ghost" type="button">＋ Caption a new video</button>
+      </div>
+      <p id="manualBanner" class="manual-banner" hidden>You're adding captions manually — use the <strong>Advanced options</strong> panel (right side) to transcribe with an API key, paste a script, or import an SRT. Or go back and upload again for automatic AI captioning.</p>
+      <div class="editor-layout">
+        <!-- Left: player + export -->
+        <div class="panel player-panel">
+          <div id="reselectBox" class="reselect-box" hidden>
+            <p><strong>Your captions are here, but the video file isn't loaded.</strong> Browsers can't bring a file back automatically — re-select the same video to preview it here and to export the captioned MP4.</p>
+            <label class="btn btn-primary file-label">Re-select your video file
+              <input id="reselectInput" type="file" accept="video/mp4,video/webm,video/*" hidden>
+            </label>
+          </div>
+          <div id="stageWrap">
+            <p id="resultFileInfo" class="file-info"></p>
+            <div class="stage">
+              <video id="video" controls playsinline></video>
+              <div id="captionOverlay" class="caption-overlay pos-bottom"><span id="captionText">Your captions will appear here</span></div>
+            </div>
+            <div class="player-actions">
+              <button id="playPauseBtn" class="btn btn-ghost" type="button">Play / Pause</button>
+              <span id="timeLabel" class="time-label">0:00 / 0:00</span>
             </div>
           </div>
-          <div class="field">
-            <label for="fontSize">Font size: <span id="fontSizeVal">28</span>px</label>
-            <input id="fontSize" type="range" min="16" max="52" value="28">
-          </div>
-          <div class="field inline">
-            <label for="textColor">Text colour</label>
-            <input id="textColor" type="color" value="#ffffff">
-            <label for="highlightColor">Highlight colour</label>
-            <input id="highlightColor" type="color" value="#ffd60a">
-          </div>
-          <div class="field inline">
-            <label><input id="bgToggle" type="checkbox" checked> Background box</label>
-            <label><input id="highlightToggle" type="checkbox" checked> Highlight current word</label>
-          </div>
-          <div class="field">
-            <label for="positionSelect">Position</label>
-            <select id="positionSelect">
-              <option value="bottom" selected>Bottom</option>
-              <option value="middle">Middle</option>
-              <option value="top">Top</option>
-            </select>
-          </div>
-        </details>
 
-        <details open>
-          <summary>3 · Edit captions <span class="hint">(click a cue to jump there)</span></summary>
-          <div class="cue-actions">
-            <button id="addCueBtn" class="btn btn-small" type="button">+ Add cue at playhead</button>
-            <label class="btn btn-small" for="srtInput">Import SRT</label>
-            <input id="srtInput" type="file" accept=".srt,text/plain" hidden>
-            <button id="clearCuesBtn" class="btn btn-small btn-ghost" type="button">Clear all</button>
-          </div>
-          <p class="hint">Import SRT brings captions in from another tool — you can then restyle them and burn them into your video.</p>
-          <div id="cueList" class="cue-list"><p class="hint">No captions yet.</p></div>
-        </details>
+          <fieldset class="export-box">
+            <legend>Export your captioned video</legend>
+            <button id="exportMp4BackendBtn" class="btn btn-primary wide" type="button">Download captioned MP4</button>
+            <p class="hint">The finished video: the caption server burns your captions into a real MP4, ready for Instagram / YouTube.</p>
+            <button id="exportSrtBtn" class="btn" type="button">Download SRT</button>
+            <button id="exportWordSrtBtn" class="btn" type="button">Download word-level SRT</button>
+            <button id="exportVideoBtn" class="btn" type="button">Browser export (.webm)</button>
+            <p class="hint">Browser export renders in real time in Chrome — keep this tab open while it plays through. Long videos take as long as they play.</p>
+            <progress id="exportProgress" value="0" max="100" hidden></progress>
+            <p class="hint" id="exportProgressText" hidden></p>
+            <button id="exportCancelBtn" class="btn btn-ghost" type="button" hidden>Cancel export</button>
+          </fieldset>
+        </div>
+
+        <!-- Right: style, edit, advanced -->
+        <div class="panel controls-panel">
+          <details open>
+            <summary>1 · Style captions</summary>
+            <div class="field">
+              <label>Theme preset</label>
+              <div class="preset-row">
+                <button class="btn preset" data-preset="clean" type="button">Clean</button>
+                <button class="btn preset" data-preset="bold-yellow" type="button">Bold Yellow</button>
+                <button class="btn preset" data-preset="high-energy" type="button">High Energy</button>
+                <button class="btn preset" data-preset="minimal" type="button">Minimal</button>
+              </div>
+            </div>
+            <div class="field">
+              <label for="fontSize">Font size: <span id="fontSizeVal">28</span>px</label>
+              <input id="fontSize" type="range" min="16" max="52" value="28">
+            </div>
+            <div class="field inline">
+              <label for="textColor">Text colour</label>
+              <input id="textColor" type="color" value="#ffffff">
+              <label for="highlightColor">Highlight colour</label>
+              <input id="highlightColor" type="color" value="#ffd60a">
+            </div>
+            <div class="field inline">
+              <label><input id="bgToggle" type="checkbox" checked> Background box</label>
+              <label><input id="highlightToggle" type="checkbox" checked> Highlight current word</label>
+            </div>
+            <div class="field">
+              <label for="positionSelect">Position</label>
+              <select id="positionSelect">
+                <option value="bottom" selected>Bottom</option>
+                <option value="middle">Middle</option>
+                <option value="top">Top</option>
+              </select>
+            </div>
+          </details>
+
+          <details open>
+            <summary>2 · Edit captions <span class="hint">(click a cue to jump there)</span></summary>
+            <div class="cue-actions">
+              <button id="addCueBtn" class="btn btn-small" type="button">+ Add cue at playhead</button>
+              <button id="clearCuesBtn" class="btn btn-small btn-ghost" type="button">Clear all</button>
+            </div>
+            <div id="cueList" class="cue-list"><p class="hint">No captions yet.</p></div>
+          </details>
+
+          <details id="advancedPanel" class="advanced">
+            <summary>Advanced options <span class="hint">— API key, script, SRT import, backend settings</span></summary>
+            <p class="hint">You don't need any of this for the main flow — upload a video and captions happen automatically. These are the manual alternatives.</p>
+            <div class="field">
+              <label for="backendUrl">Caption server (backend) URL override <span class="hint">(leave empty — the app finds the caption server automatically)</span></label>
+              <input id="backendUrl" type="text" autocomplete="off" placeholder="Automatic — leave empty">
+            </div>
+            <hr>
+            <div class="field">
+              <label for="apiProvider">Transcription provider <span class="hint">(only for the API-key mode below)</span></label>
+              <select id="apiProvider">
+                <option value="openai" selected>OpenAI (api.openai.com)</option>
+                <option value="openrouter">OpenRouter (openrouter.ai)</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="apiKey">API key <span class="hint">(kept only in memory — never saved; OpenRouter keys start with sk-or-)</span></label>
+              <input id="apiKey" type="password" autocomplete="off" placeholder="sk-...">
+            </div>
+            <div class="field">
+              <label for="languageSelect">Language hint <span class="hint">(advanced modes only — automatic captioning always uses the Hinglish default)</span></label>
+              <select id="languageSelect">
+                <option value="">Auto / Hinglish mix</option>
+                <option value="hi">Hindi</option><option value="en">English</option>
+                <option value="ta">Tamil</option><option value="te">Telugu</option>
+                <option value="bn">Bengali</option><option value="mr">Marathi</option>
+                <option value="gu">Gujarati</option><option value="kn">Kannada</option>
+                <option value="ml">Malayalam</option><option value="pa">Punjabi</option>
+                <option value="ur">Urdu</option>
+              </select>
+            </div>
+            <button id="transcribeBtn" class="btn wide" type="button">Transcribe with API key</button>
+            <hr>
+            <div class="field">
+              <label for="scriptInput">Paste your script / transcript</label>
+              <textarea id="scriptInput" rows="5" placeholder="Yaar suno, aaj main aapko ek aisi trick batane wala hoon jo literally game changer hai..."></textarea>
+            </div>
+            <button id="scriptBtn" class="btn wide" type="button">Create captions from script</button>
+            <button id="demoBtn" class="btn btn-ghost wide" type="button">Load Hinglish demo transcript</button>
+            <hr>
+            <div class="field">
+              <label>Import captions from an SRT file</label>
+              <label class="btn wide" for="srtInput">Import SRT</label>
+              <input id="srtInput" type="file" accept=".srt,text/plain" hidden>
+              <p class="hint">Import SRT brings captions in from another tool — you can then restyle them and burn them into your video.</p>
+            </div>
+          </details>
+        </div>
       </div>
     </div>
   </section>
@@ -199,19 +284,19 @@
   <!-- FAQ -->
   <section id="faq" class="faq">
     <h2>Questions creators ask</h2>
-    <details><summary>Does my video leave my device?</summary><p>Only when you ask it to. Editing, styling, SRT export and the browser WebM export all run locally. Your video is sent only when you press “Auto-caption my video” / “Export MP4 (backend)” (to your Caption AI backend) or “Transcribe with API key” (to OpenAI/OpenRouter, using your own key).</p></details>
+    <details><summary>Does my video leave my device?</summary><p>Only to be captioned. When you upload a video, it is sent to the Caption AI server, which transcribes it and — for the captioned MP4 export — burns the captions in. Editing, styling and SRT downloads all happen in your browser. If you use your own API key in Advanced options, the file goes to that provider instead.</p></details>
     <details><summary>Why Roman script for Hinglish?</summary><p>Most short-form captions in India are read in Roman script because that's how people type and chat every day. Roman Hinglish keeps the mix of Hindi and English natural and easy to scan on a phone.</p></details>
     <details><summary>What if the transcription makes a mistake?</summary><p>It will, sometimes — especially with names, slang, or fast speech. That's why every cue is editable. Click a caption, fix the words, and the preview and exports update instantly.</p></details>
-    <details><summary>Why is Whisper limited to 25 MB?</summary><p>That's OpenAI's upload limit for the transcription endpoint. For longer videos, compress the clip, trim it, or paste a script instead — script mode has no size limit.</p></details>
-    <details><summary>What format is the exported video?</summary><p>Two ways: the browser export produces a WebM file with captions burned in (Chrome, renders in real time). Or use <strong>Export MP4 (backend)</strong> — the backend burns the captions in with FFmpeg and returns a real MP4, ready for Instagram/YouTube.</p></details>
-    <details><summary>How does Auto-caption work without an API key?</summary><p>The Caption AI backend runs Whisper on the server itself. Your video is uploaded to that backend, transcribed there, and the captions come back to this editor — no OpenAI key and no pasting scripts. Run it locally or deploy it (see the README) and point the Backend URL field at it; if this page was served by the backend, it just works.</p></details>
+    <details><summary>Why is the API-key mode limited to 25 MB?</summary><p>That's OpenAI's upload limit for its transcription endpoint. The main automatic flow has no such problem — the caption server accepts videos up to 300 MB.</p></details>
+    <details><summary>What format is the exported video?</summary><p>The main download is a real MP4 with captions burned in by the server, ready for Instagram/YouTube. There's also a browser export that produces a WebM in Chrome (renders in real time), plus SRT caption files.</p></details>
+    <details><summary>How does automatic captioning work without an API key?</summary><p>The Caption AI server runs Whisper on itself. Your video is uploaded to that server, transcribed there, and the captions come back to this editor — no key and no pasting scripts. The app finds the server automatically; you never have to type an address.</p></details>
     <details><summary>Do you store my API key?</summary><p>No. Your key lives only in the page's memory while the tab is open. Refresh the page and it's gone. It is never written to localStorage, cookies, or any server by this app.</p></details>
   </section>
 </main>
 
 <footer>
   <p><strong>Caption AI</strong> — Hinglish-first captions for talking-head creators.</p>
-  <p class="hint">Static demo app. Runs entirely in your browser except optional Whisper transcription via your own OpenAI key.</p>
+  <p class="hint">Captions are generated on the Caption AI server; editing and styling happen in your browser.</p>
 </footer>
 
 <script src="app.js"></script>
