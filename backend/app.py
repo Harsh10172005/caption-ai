@@ -961,6 +961,126 @@ def _burn_vf(srt_path, fontsize, color, position):
     return f"subtitles={srt_path}:force_style='{force_style}'"
 
 
+def probe_dimensions(path):
+    """(width, height) of the first video stream, (0, 0) if unreadable."""
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height",
+             "-of", "csv=p=0:s=x", str(path)],
+            capture_output=True, text=True, timeout=60)
+        w, h = out.stdout.strip().split("x")
+        return int(w), int(h)
+    except Exception:
+        return 0, 0
+
+
+def _ass_color(hex_value, alpha="00"):
+    m = re.fullmatch(r"#?([0-9a-fA-F]{6})", (hex_value or "").strip())
+    if not m:
+        return f"&H{alpha}FFFFFF"
+    r, g, b = (m.group(1)[i:i + 2] for i in (0, 2, 4))
+    return f"&H{alpha}{b}{g}{r}".upper()
+
+
+def _ass_time(sec):
+    sec = max(0.0, float(sec))
+    h = int(sec // 3600); m = int((sec % 3600) // 60)
+    s_int = int(sec % 60); cs = int(round((sec - int(sec)) * 100))
+    if cs == 100:
+        s_int += 1; cs = 0
+    return f"{h}:{m:02d}:{s_int:02d}.{cs:02d}"
+
+
+def _ass_escape(text):
+    return (str(text).replace("\\", " ").replace("{", "").replace("}", "")
+            .replace("\n", " ").replace("\r", " ").strip())
+
+
+def build_ass(cues, width, height, font_px, base_color, highlight_color,
+              karaoke, bg, position):
+    """Build an ASS subtitle file that matches the editor preview: the
+    PlayRes IS the real video resolution and the font size is in real
+    pixels, so burned captions come out the same size as the preview —
+    and with karaoke word timings, libass sweeps each word from the base
+    colour to the highlight colour as it is spoken (\\kf tags)."""
+    alignment = {"bottom": 2, "middle": 5, "top": 8}.get((position or "bottom").lower(), 2)
+    margin_v = {"bottom": round(height * 0.10), "top": round(height * 0.08)}.get(
+        (position or "bottom").lower(), 0)
+    # In ASS karaoke, unspoken text uses SecondaryColour and the sweep
+    # fills it with PrimaryColour — the preview does exactly the same
+    # (base colour first, highlight once a word is spoken).
+    primary = _ass_color(highlight_color if karaoke else base_color)
+    secondary = _ass_color(base_color)
+    border_style = 3 if bg else 1
+    outline = max(1, round(font_px * (0.18 if bg else 0.07)))
+    header = f"""[Script Info]
+ScriptType: v4.00+
+PlayResX: {width}
+PlayResY: {height}
+WrapStyle: 0
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,DejaVu Sans,{font_px},{primary},{secondary},&H99000000,&H47000000,-1,0,0,0,100,100,0,0,{border_style},{outline},0,{alignment},{round(width * 0.08)},{round(width * 0.08)},{margin_v},1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+    lines = [header]
+    for cue in cues:
+        start, end = float(cue.get("start", 0)), float(cue.get("end", 0))
+        if end <= start:
+            continue
+        words = cue.get("words") or []
+        if karaoke and words:
+            parts = []
+            first_start = float(words[0].get("start", start))
+            gap_cs = int(round((first_start - start) * 100))
+            if gap_cs > 3:
+                parts.append(f"{{\\kf{gap_cs}}}")
+            for w in words:
+                dur_cs = max(1, int(round((float(w.get("end", start)) - float(w.get("start", start))) * 100)))
+                parts.append(f"{{\\kf{dur_cs}}}" + _ass_escape(w.get("word", "")) + " ")
+            text = "".join(parts).strip()
+        else:
+            text = _ass_escape(cue.get("text", ""))
+        if not text:
+            continue
+        lines.append(f"Dialogue: 0,{_ass_time(start)},{_ass_time(end)},Default,,0,0,0,,{text}")
+    return "\n".join(lines) + "\n"
+
+
+def _choose_subs(tmp, video_path, srt_text, fontsize, color, position,
+                 cues_json="", highlight="", karaoke="", bg="", font_px=0):
+    """Pick the subtitle source for a burn: a styled ASS built from the
+    editor's cues (exact size + karaoke) when cue JSON was sent, else the
+    legacy SRT + force_style path. Returns (subs_path, vf_filter)."""
+    cues = None
+    if cues_json:
+        try:
+            parsed = json.loads(cues_json)
+            if isinstance(parsed, list) and parsed:
+                cues = parsed
+        except ValueError:
+            cues = None
+    if cues:
+        width, height = probe_dimensions(video_path)
+        if width > 0 and height > 0:
+            eff_px = font_px if 8 <= font_px <= 600 else max(14, round(fontsize * height / 288))
+            ass_path = tmp / "subs.ass"
+            ass_path.write_text(build_ass(
+                cues, width, height, eff_px, color, highlight or color,
+                karaoke.strip().lower() in ("1", "true", "yes"),
+                bg.strip().lower() in ("1", "true", "yes"),
+                position), encoding="utf-8")
+            return ass_path, f"subtitles={ass_path}"
+    srt_path = tmp / "subs.srt"
+    srt_path.write_text(srt_text, encoding="utf-8")
+    return srt_path, _burn_vf(srt_path, fontsize, color, position)
+
+
 # ------------------------------------------------------------- burn jobs ---
 # Rendering a captioned MP4 on a CPU-capped free server takes minutes, so
 # a single blocking request feels broken (and can die at a proxy). Burn
@@ -1057,6 +1177,11 @@ def create_burn_job(
     fontsize: int = Form(24),
     color: str = Form("#ffffff"),
     position: str = Form("bottom"),
+    cues_json: str = Form(""),
+    highlight: str = Form(""),
+    karaoke: str = Form(""),
+    bg: str = Form(""),
+    font_px: int = Form(0),
 ):
     if not srt.strip():
         return json_error("No SRT content was provided.")
@@ -1071,8 +1196,9 @@ def create_burn_job(
     if size == 0:
         shutil.rmtree(tmp, ignore_errors=True)
         return json_error("The uploaded file was empty.")
-    srt_path = tmp / "subs.srt"
-    srt_path.write_text(srt, encoding="utf-8")
+    srt_path, vf = _choose_subs(tmp, video_path, srt, fontsize, color, position,
+                                cues_json=cues_json, highlight=highlight,
+                                karaoke=karaoke, bg=bg, font_px=font_px)
     job_id = uuid.uuid4().hex
     job = {
         "id": job_id, "status": "processing", "progress": 0,
@@ -1085,8 +1211,7 @@ def create_burn_job(
         _burn_jobs[job_id] = job
     threading.Thread(
         target=_run_burn_job,
-        args=(job, video_path, srt_path, job["out_path"],
-              _burn_vf(srt_path, fontsize, color, position), tmp),
+        args=(job, video_path, srt_path, job["out_path"], vf, tmp),
         daemon=True).start()
     return {"ok": True, "job_id": job_id, "status": "processing"}
 
@@ -1132,6 +1257,11 @@ def burn(
     fontsize: int = Form(24),
     color: str = Form("#ffffff"),
     position: str = Form("bottom"),
+    cues_json: str = Form(""),
+    highlight: str = Form(""),
+    karaoke: str = Form(""),
+    bg: str = Form(""),
+    font_px: int = Form(0),
 ):
     if not srt.strip():
         return json_error("No SRT content was provided.")
@@ -1147,10 +1277,10 @@ def burn(
         shutil.rmtree(tmp, ignore_errors=True)
         return json_error("The uploaded file was empty.")
 
-    srt_path = tmp / "subs.srt"
-    srt_path.write_text(srt, encoding="utf-8")
+    srt_path, vf = _choose_subs(tmp, video_path, srt, fontsize, color, position,
+                                cues_json=cues_json, highlight=highlight,
+                                karaoke=karaoke, bg=bg, font_px=font_px)
     out_path = tmp / "captioned.mp4"
-    vf = _burn_vf(srt_path, fontsize, color, position)
     # ultrafast: on CPU-capped free tiers (e.g. Render free = 0.15 CPU) the
     # encode is the bottleneck; veryfast made short burns exceed any sane
     # client timeout. ultrafast is several times faster at a larger file size.

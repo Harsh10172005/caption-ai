@@ -805,6 +805,16 @@ $("exportMp4BackendBtn").addEventListener("click", async () => {
     form.append("fontsize", String(Math.max(14, Math.round(style.size * 0.85))));
     form.append("color", style.color);
     form.append("position", style.pos);
+    // Styled render: send the cues with word timings + both colours so
+    // the burned MP4 matches the preview — same relative font size
+    // (preview px scaled from the on-screen player to the real video
+    // width) and the karaoke word sweep in the highlight colour.
+    form.append("cues_json", JSON.stringify(cues));
+    form.append("highlight", style.highlight);
+    form.append("karaoke", style.karaoke ? "1" : "0");
+    form.append("bg", style.bg ? "1" : "0");
+    const scale = (video.videoWidth && video.clientWidth) ? video.videoWidth / video.clientWidth : 3;
+    form.append("font_px", String(Math.max(8, Math.round(style.size * scale))));
     const res = await fetch(base + "/api/burn-jobs", { method: "POST", body: form });
     if (!res.ok) throw new Error(await parseBackendError(res));
     const created = await res.json();
