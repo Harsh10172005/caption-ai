@@ -672,7 +672,7 @@ function onJobCancelled() {
   box.hidden = false; box.classList.add("cancelled");
   $("procErrorMsg").textContent = "Captioning was cancelled. Your video wasn't changed — try again whenever you're ready.";
   $("procRetryBtn").hidden = !videoFile;
-  $("procKeyBtn").hidden = true; $("procScriptBtn").hidden = true;
+  $("procKeyBtn").hidden = false; $("procScriptBtn").hidden = false;
   setStatus("Captioning cancelled — nothing was changed.");
 }
 function onJobGone() {
@@ -712,6 +712,7 @@ function leaveJobForManual(focus) {
   enterResult({ manual: true, focus });
 }
 $("procKeyBtn").addEventListener("click", () => leaveJobForManual("apiKey"));
+$("procKeyBtnTop").addEventListener("click", () => leaveJobForManual("apiKey"));
 $("procScriptBtn").addEventListener("click", () => leaveJobForManual("scriptInput"));
 $("procStartOverBtn").addEventListener("click", resetAll);
 $("newVideoBtn").addEventListener("click", resetAll);
