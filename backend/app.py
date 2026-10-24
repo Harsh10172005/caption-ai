@@ -973,17 +973,67 @@ def _burn_vf(srt_path, fontsize, color, position):
 
 
 def probe_dimensions(path):
-    """(width, height) of the first video stream, (0, 0) if unreadable."""
+    """(width, height) of the first video stream, (0, 0) if unreadable.
+
+    Defensive cascade: a real VN export produced ffprobe output the original
+    one-line csv split could not parse, which silently returned (0, 0) and
+    disabled the styled burn (job 3dbf49c5 logged dims=0x0 with cues present).
+    1) ffprobe JSON — first video stream with integer dims (rotation-aware:
+       ASS PlayRes lives in display space, so 90/270 swaps the pair).
+    2) ffprobe csv — first line that is exactly WxH.
+    3) ffmpeg -i banner — the Video stream line.
+    Every failure is logged; silence here once hid the whole bug.
+    """
+    def _maybe_swap(w, h, rotation):
+        try:
+            r = abs(int(rotation)) % 180
+        except (TypeError, ValueError):
+            r = 0
+        return (h, w) if r == 90 else (w, h)
+
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries",
+             "stream=codec_type,width,height:stream_tags=rotate",
+             "-of", "json", str(path)],
+            capture_output=True, text=True, timeout=60)
+        data = json.loads(out.stdout or "{}")
+        for st in data.get("streams", []):
+            if st.get("codec_type") != "video":
+                continue
+            w, h = int(st.get("width") or 0), int(st.get("height") or 0)
+            if w > 0 and h > 0:
+                rot = (st.get("tags") or {}).get("rotate")
+                for sd in st.get("side_data_list", []) or []:
+                    if sd.get("rotation") is not None:
+                        rot = sd.get("rotation")
+                return _maybe_swap(w, h, rot)
+        print(f"[burn] probe json: no video dims in {(out.stdout or '')[:160]!r}", flush=True)
+    except Exception as exc:
+        print(f"[burn] probe json failed: {exc!r}", flush=True)
     try:
         out = subprocess.run(
             ["ffprobe", "-v", "error", "-select_streams", "v:0",
              "-show_entries", "stream=width,height",
              "-of", "csv=p=0:s=x", str(path)],
             capture_output=True, text=True, timeout=60)
-        w, h = out.stdout.strip().split("x")
-        return int(w), int(h)
-    except Exception:
-        return 0, 0
+        for line in (out.stdout or "").splitlines():
+            m = re.fullmatch(r"\s*(\d+)x(\d+)\s*", line)
+            if m:
+                return int(m.group(1)), int(m.group(2))
+        print(f"[burn] probe csv unparsable: {(out.stdout or '')[:160]!r}", flush=True)
+    except Exception as exc:
+        print(f"[burn] probe csv failed: {exc!r}", flush=True)
+    try:
+        out = subprocess.run(["ffmpeg", "-i", str(path)],
+                             capture_output=True, text=True, timeout=60)
+        m = re.search(r"Video:.*?(\d{2,5})x(\d{2,5})", out.stderr or "")
+        if m:
+            return int(m.group(1)), int(m.group(2))
+        print("[burn] probe ffmpeg-i: no Video dims found", flush=True)
+    except Exception as exc:
+        print(f"[burn] probe ffmpeg-i failed: {exc!r}", flush=True)
+    return 0, 0
 
 
 def _ass_color(hex_value, alpha="00"):
