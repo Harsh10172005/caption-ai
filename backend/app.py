@@ -102,6 +102,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def no_cache_frontend(request, call_next):
+    """The frontend must never be served stale from a browser cache: a cached
+    app.js once kept an old download flow alive after the fix deployed."""
+    response = await call_next(request)
+    path = request.url.path
+    if path == "/" or path.endswith((".html", ".js", ".css")):
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+    return response
+
 # ---------------------------------------------------------------- model ----
 _model = None
 _model_lock = threading.Lock()
@@ -1067,6 +1078,7 @@ def _choose_subs(tmp, video_path, srt_text, fontsize, color, position,
             cues = None
     if cues:
         width, height = probe_dimensions(video_path)
+        print(f"[burn] subs choice: cues={len(cues)} dims={width}x{height} font_px={font_px}", flush=True)
         if width > 0 and height > 0:
             eff_px = font_px if 8 <= font_px <= 600 else max(14, round(fontsize * height / 288))
             ass_path = tmp / "subs.ass"
@@ -1076,6 +1088,7 @@ def _choose_subs(tmp, video_path, srt_text, fontsize, color, position,
                 bg.strip().lower() in ("1", "true", "yes"),
                 position), encoding="utf-8")
             return ass_path, f"subtitles={ass_path}"
+    print(f"[burn] subs choice: LEGACY SRT path (cues_json={'yes' if cues_json else 'no'})", flush=True)
     srt_path = tmp / "subs.srt"
     srt_path.write_text(srt_text, encoding="utf-8")
     return srt_path, _burn_vf(srt_path, fontsize, color, position)
